@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ApexSenseBridge VERSION 0.6.2 LANGUAGES CXX)
+project(ApexSenseBridge VERSION 0.6.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -285,5 +285,9 @@ if(BUILD_TESTING)
                  COMMAND powershell -NoProfile -NonInteractive
                          -ExecutionPolicy Bypass
                          -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_installer_registry_contract.ps1)
+        add_test(NAME release_version_contract
+                 COMMAND powershell -NoProfile -NonInteractive
+                         -ExecutionPolicy Bypass
+                         -File ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify-version-consistency.ps1)
     endif()
 endif()

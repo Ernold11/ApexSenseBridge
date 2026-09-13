@@ -1,5 +1,5 @@
 #define AppName "ApexSenseBridge"
-#define AppVersion "0.6.2"
+#define AppVersion "0.6.3"
 #define AppPublisher "ApexSenseBridge contributors"
 #define AppId "{{5F8B1901-93E1-41E2-96B4-F1B278A5A630}"
 #define ExtensionId "ApexSenseBridge_e41b1737-6753-4b59-bc65-4fdd6a7df7f4"
@@ -12,6 +12,7 @@
 #define UsbipInstaller "USBip-0.9.8.0-x64.exe"
 #define HidHideProductCode "{{01E0AB21-D1CC-42B4-9DFF-84FFE4F26DAF}"
 #define HidHideProductCodePascal "{01E0AB21-D1CC-42B4-9DFF-84FFE4F26DAF}"
+#define HidHideOwnerProof "ApexSenseBridge|01E0AB21-D1CC-42B4-9DFF-84FFE4F26DAF|1.5.230"
 
 [Setup]
 AppId={#AppId}
@@ -94,7 +95,7 @@ Source: "..\playnite\ApexSenseBridge\bin\Release\Localization\*"; DestDir: "{use
 ; when its AppId is already registered. We reject that unsafe upgrade path in
 ; InitializeSetup and use a bounded wrapper only for a genuinely fresh install.
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{tmp}\ApexSenseBridge\install-usbip.ps1"" -InstallerPath ""{tmp}\ApexSenseBridge\{#UsbipInstaller}"" -LogPath ""{commonappdata}\ApexSenseBridge\usbip-install.log"""; StatusMsg: "{cm:InstallingUsbip}"; Flags: runhidden waituntilterminated; Check: NeedUsbip; AfterInstall: VerifyUsbipInstall
-Filename: "{tmp}\ApexSenseBridge\HidHide_1.5.230_x64.exe"; Parameters: "/quiet /norestart"; StatusMsg: "{cm:InstallingHidHide}"; Flags: runhidden waituntilterminated; Check: NeedHidHide
+Filename: "{tmp}\ApexSenseBridge\HidHide_1.5.230_x64.exe"; Parameters: "/quiet /norestart"; StatusMsg: "{cm:InstallingHidHide}"; Flags: runhidden waituntilterminated; Check: NeedHidHide; AfterInstall: VerifyHidHideInstall
 Filename: "{app}\ApexSenseBridgeTray.exe"; Description: "Lancer ApexSenseBridge Tray (Barre des tâches)"; Flags: nowait postinstall skipifsilent
 
 [Registry]
@@ -129,14 +130,16 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM ApexSenseBridgeTray.exe";
 Filename: "{app}\ApexSenseBridge.exe"; Parameters: "stop-active-sessions"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "GracefulStopBridge"
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM ApexSenseBridge.exe"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "StopBridge"
 Filename: "{app}\ApexSenseBridge.exe"; Parameters: "restore-controller-visibility"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RestoreVisibility"
-Filename: "{code:GetUsbipUninstaller}"; Parameters: "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-"; Flags: runhidden waituntilterminated skipifdoesntexist; Check: ShouldRemoveUsbip; RunOnceId: "RemoveUsbip"
-Filename: "{sys}\msiexec.exe"; Parameters: "/x {#HidHideProductCode} /quiet /norestart"; Flags: runhidden waituntilterminated; Check: ShouldRemoveHidHide; RunOnceId: "RemoveHidHide"
+; USBip owns a filter whose install/removal restarts every USB hub. It is never
+; removed by the ApexSenseBridge uninstaller. Users can remove it separately
+; from Windows Settings after they have restarted and prepared a recovery path.
+Filename: "{sys}\msiexec.exe"; Parameters: "/x {#HidHideProductCode} /quiet /norestart"; Flags: runhidden waituntilterminated; Check: ShouldRemoveHidHide; AfterInstall: AuditHidHideRemoval; RunOnceId: "RemoveHidHide"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\Playnite\Extensions\{#ExtensionId}"
-Type: filesandordirs; Name: "{userappdata}\Playnite\ExtensionsData\{#ExtensionId}"
-Type: filesandordirs; Name: "{userappdata}\Playnite\ExtensionsData\e41b1737-6753-4b59-bc65-4fdd6a7df7f4"
-Type: filesandordirs; Name: "{localappdata}\ApexSenseBridge"
+Type: filesandordirs; Name: "{userappdata}\Playnite\ExtensionsData\{#ExtensionId}"; Check: ShouldDeleteUserData
+Type: filesandordirs; Name: "{userappdata}\Playnite\ExtensionsData\e41b1737-6753-4b59-bc65-4fdd6a7df7f4"; Check: ShouldDeleteUserData
+Type: filesandordirs; Name: "{localappdata}\ApexSenseBridge"; Check: ShouldDeleteUserData
 
 [Code]
 var
@@ -145,8 +148,12 @@ var
   UsbipUdeServicePresent: Boolean;
   UsbipFilterServicePresent: Boolean;
   HidHideWasPresent: Boolean;
+  HidHideUninstallEntryPresent: Boolean;
+  HidHideServicePresent: Boolean;
   OwnsUsbip: Boolean;
   OwnsHidHide: Boolean;
+  RemoveHidHideApproved: Boolean;
+  DeleteUserDataApproved: Boolean;
   UsbipVersionBefore: String;
   HidHideVersionBefore: String;
 
@@ -203,8 +210,13 @@ begin
   if UsbipUninstallEntryPresent then
     RegQueryStringValue(
       HKLM64, UsbipUninstallKey, 'DisplayVersion', UsbipVersionBefore);
-  HidHideWasPresent := RegQueryStringValue(
-    HKLM64, HidHideUninstallKey, 'DisplayVersion', HidHideVersionBefore);
+  HidHideUninstallEntryPresent := RegKeyExists(HKLM64, HidHideUninstallKey);
+  HidHideServicePresent := RegKeyExists(
+    HKLM, 'SYSTEM\CurrentControlSet\Services\HidHide');
+  HidHideWasPresent := HidHideUninstallEntryPresent or HidHideServicePresent;
+  if HidHideUninstallEntryPresent then
+    RegQueryStringValue(
+      HKLM64, HidHideUninstallKey, 'DisplayVersion', HidHideVersionBefore);
 
   OwnsUsbip := not UsbipWasPresent;
   if RegQueryDWordValue(HKLM64, 'SOFTWARE\ApexSenseBridge',
@@ -285,6 +297,70 @@ begin
     Result := False;
     Exit;
   end;
+
+  HidHideVersionBefore := Trim(HidHideVersionBefore);
+  if HidHideUninstallEntryPresent and (HidHideVersionBefore = '') then
+  begin
+    MsgBox(
+      UsbipMessage(
+        'Une installation HidHide endommagee ou incomplete a ete detectee.'#13#10#13#10 +
+        'ApexSenseBridge ne tentera pas de la remplacer automatiquement. ' +
+        'Reparez ou desinstallez HidHide depuis les Parametres Windows, ' +
+        'redemarrez, puis relancez ce programme.',
+        'A damaged or incomplete HidHide installation was detected.'#13#10#13#10 +
+        'ApexSenseBridge will not replace it automatically. Repair or uninstall ' +
+        'HidHide from Windows Settings, restart Windows, then run setup again.'),
+      mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  if HidHideUninstallEntryPresent and
+     (CompareText(HidHideVersionBefore, '1.5.230') <> 0) then
+  begin
+    MsgBox(
+      UsbipMessage(
+        'HidHide ' + HidHideVersionBefore + ' est deja installe.'#13#10#13#10 +
+        'Pour eviter une mise a niveau ou retrogradation ambigue d''un pilote ' +
+        'partage, ApexSenseBridge ne le remplacera pas automatiquement. ' +
+        'Installez la version 1.5.230 manuellement, redemarrez, puis relancez ' +
+        'ce programme.',
+        'HidHide ' + HidHideVersionBefore + ' is already installed.'#13#10#13#10 +
+        'To avoid an ambiguous upgrade or downgrade of a shared driver, ' +
+        'ApexSenseBridge will not replace it automatically. Install version ' +
+        '1.5.230 manually, restart Windows, then run setup again.'),
+      mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  if HidHideUninstallEntryPresent and (not HidHideServicePresent) then
+  begin
+    MsgBox(
+      UsbipMessage(
+        'HidHide 1.5.230 est enregistre, mais son service pilote est absent. ' +
+        'Reparez HidHide, redemarrez Windows, puis relancez ce programme.',
+        'HidHide 1.5.230 is registered, but its driver service is missing. ' +
+        'Repair HidHide, restart Windows, then run setup again.'),
+      mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  if (not HidHideUninstallEntryPresent) and HidHideServicePresent then
+  begin
+    MsgBox(
+      UsbipMessage(
+        'Un service HidHide existe sans installation enregistree. ' +
+        'ApexSenseBridge ne modifiera pas cet etat ambigu. Reparez ou supprimez ' +
+        'HidHide, redemarrez Windows, puis relancez ce programme.',
+        'A HidHide service exists without a registered installation. ' +
+        'ApexSenseBridge will not modify this ambiguous state. Repair or remove ' +
+        'HidHide, restart Windows, then run setup again.'),
+      mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
   Result := True;
 end;
 
@@ -325,8 +401,36 @@ end;
 
 function NeedHidHide: Boolean;
 begin
-  Result := (not HidHideWasPresent) or
-            (CompareText(HidHideVersionBefore, '1.5.230') <> 0);
+  Result := not HidHideWasPresent;
+end;
+
+procedure VerifyHidHideInstall;
+var
+  InstalledVersion: String;
+begin
+  if (not RegQueryStringValue(
+        HKLM64, HidHideUninstallKey, 'DisplayVersion', InstalledVersion)) or
+     (CompareText(Trim(InstalledVersion), '1.5.230') <> 0) or
+     (not RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\HidHide')) then
+  begin
+    RaiseException(
+      UsbipMessage(
+        'L''installation de HidHide 1.5.230 n''a pas abouti. Redemarrez Windows, ' +
+        'reparez HidHide depuis les Parametres Windows, puis relancez ' +
+        'l''installation.',
+        'HidHide 1.5.230 did not install successfully. Restart Windows, repair ' +
+        'HidHide from Windows Settings, then run setup again.'));
+  end;
+
+  if not RegWriteStringValue(
+      HKLM64, 'SOFTWARE\ApexSenseBridge', 'HidHideOwnerProof',
+      '{#HidHideOwnerProof}') then
+    RaiseException(
+      UsbipMessage(
+        'Impossible d''enregistrer la provenance de HidHide. L''installation ' +
+        'est annulee afin que le pilote ne puisse jamais etre supprime sans preuve.',
+        'Could not record HidHide provenance. Setup is being cancelled so the ' +
+        'driver can never be removed without proof.'));
 end;
 
 function NeedRestart: Boolean;
@@ -344,35 +448,111 @@ begin
   if OwnsHidHide then Result := '1' else Result := '0';
 end;
 
-function FullDependencyRemovalRequested: Boolean;
-begin
-  Result := HasCommandLineParameter('/REMOVEDEPENDENCIES');
-end;
-
-function ShouldRemoveUsbip: Boolean;
+function HasOwnerProof(const OwnershipName, ProofName,
+  ExpectedProof: String): Boolean;
 var
   Ownership: Cardinal;
+  Proof: String;
 begin
-  Result := FullDependencyRemovalRequested or
-            (RegQueryDWordValue(HKLM64, 'SOFTWARE\ApexSenseBridge',
-                                'OwnsUsbip', Ownership) and (Ownership <> 0));
+  Result := RegQueryDWordValue(HKLM64, 'SOFTWARE\ApexSenseBridge',
+                              OwnershipName, Ownership) and
+            (Ownership <> 0) and
+            RegQueryStringValue(HKLM64, 'SOFTWARE\ApexSenseBridge',
+                                ProofName, Proof) and
+            (CompareText(Trim(Proof), ExpectedProof) = 0);
+end;
+
+function IsSafelyOwnedHidHide: Boolean;
+var
+  DisplayName, DisplayVersion: String;
+begin
+  Result := HasOwnerProof('OwnsHidHide', 'HidHideOwnerProof',
+                          '{#HidHideOwnerProof}') and
+            RegQueryStringValue(HKLM64, HidHideUninstallKey,
+                                'DisplayName', DisplayName) and
+            (CompareText(Trim(DisplayName), 'HidHide') = 0) and
+            RegQueryStringValue(HKLM64, HidHideUninstallKey,
+                                'DisplayVersion', DisplayVersion) and
+            (CompareText(Trim(DisplayVersion), '1.5.230') = 0) and
+            RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\HidHide');
+end;
+
+function InitializeUninstall: Boolean;
+var
+  HidHideOwned: Boolean;
+begin
+  Result := True;
+  RemoveHidHideApproved := False;
+  DeleteUserDataApproved := HasCommandLineParameter('/REMOVEUSERDATA');
+
+  HidHideOwned := IsSafelyOwnedHidHide;
+  if UninstallSilent then
+    Exit;
+
+  if not DeleteUserDataApproved then
+    DeleteUserDataApproved := MsgBox(
+      UsbipMessage(
+        'Supprimer aussi les reglages, profils Playnite, associations apprises ' +
+        'et journaux de diagnostic de cet utilisateur ?'#13#10#13#10 +
+        'Choisissez Non pour les conserver en vue d''une reinstallation ou ' +
+        'd''un diagnostic.',
+        'Also delete this user''s settings, Playnite profiles, learned ' +
+        'associations and diagnostic logs?'#13#10#13#10 +
+        'Choose No to keep them for a reinstall or diagnosis.'),
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+
+  if HidHideOwned then
+    RemoveHidHideApproved := MsgBox(
+      UsbipMessage(
+        'HidHide 1.5.230 a ete installe par ApexSenseBridge et sa provenance ' +
+        'vient d''etre verifiee.'#13#10#13#10 +
+        'Voulez-vous aussi supprimer ce pilote noyau partage ? Conserver ' +
+        'HidHide est recommande si une autre application peut l''utiliser.'#13#10#13#10 +
+        'USBip sera toujours conserve et ne sera jamais supprime par ce programme.',
+        'HidHide 1.5.230 was installed by ApexSenseBridge and its provenance ' +
+        'was just verified.'#13#10#13#10 +
+        'Do you also want to remove this shared kernel driver? Keeping HidHide ' +
+        'is recommended if another application may use it.'#13#10#13#10 +
+        'USBip will always be kept and is never removed by this program.'),
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
 end;
 
 function ShouldRemoveHidHide: Boolean;
-var
-  Ownership: Cardinal;
 begin
-  Result := FullDependencyRemovalRequested or
-            (RegQueryDWordValue(HKLM64, 'SOFTWARE\ApexSenseBridge',
-                                'OwnsHidHide', Ownership) and (Ownership <> 0));
+  Result := RemoveHidHideApproved and IsSafelyOwnedHidHide;
 end;
 
-function GetUsbipUninstaller(Param: String): String;
-var
-  Location: String;
+function ShouldDeleteUserData: Boolean;
 begin
-  if RegQueryStringValue(HKLM64, UsbipUninstallKey, 'InstallLocation', Location) then
-    Result := AddBackslash(Location) + 'unins000.exe'
-  else
-    Result := ExpandConstant('{pf64}\USBip\unins000.exe');
+  Result := DeleteUserDataApproved;
+end;
+
+procedure AuditHidHideRemoval;
+var
+  RegistrationPresent, ServicePresent: Boolean;
+begin
+  RegistrationPresent := RegKeyExists(HKLM64, HidHideUninstallKey);
+  ServicePresent := RegKeyExists(
+    HKLM, 'SYSTEM\CurrentControlSet\Services\HidHide');
+  Log('HidHide post-removal audit: registration=' +
+      IntToStr(Ord(RegistrationPresent)) + ', service=' +
+      IntToStr(Ord(ServicePresent)));
+
+  if RegistrationPresent then
+  begin
+    Log('WARNING: HidHide removal did not remove its product registration.');
+    if not UninstallSilent then
+      MsgBox(
+        UsbipMessage(
+          'La suppression de HidHide semble incomplete. Redemarrez Windows, ' +
+          'puis utilisez les Parametres Windows si son entree est toujours presente.',
+          'HidHide removal appears incomplete. Restart Windows, then use Windows ' +
+          'Settings if its entry is still present.'),
+        mbError, MB_OK);
+  end;
+end;
+
+function UninstallNeedRestart: Boolean;
+begin
+  Result := RemoveHidHideApproved;
 end;

@@ -1,6 +1,7 @@
 using ApexSenseBridgeTray.Common;
 using ApexSenseBridgeTray.Models;
 using ApexSenseBridgeTray.Services;
+using ApexSenseBridge.Security;
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -23,6 +24,7 @@ internal static class TrayLearningTests
 
         try
         {
+            TestReleaseAssetPolicy();
             TestStableLearningResolutionExportAndDeletion(testRoot);
             TestCancelledAndUnstableSessionsAreNotLearned(testRoot);
             TestConcurrentObservationsAreIndependent(testRoot);
@@ -53,6 +55,30 @@ internal static class TrayLearningTests
         {
             try { Directory.Delete(testRoot, true); } catch { }
         }
+    }
+
+    private static void TestReleaseAssetPolicy()
+    {
+        const string officialUrl =
+            "https://github.com/ReynArts/ApexSenseBridge/releases/download/v0.6.3/ApexSenseBridge-Setup.exe";
+        Assert(ReleaseSecurity.IsExpectedSetupAsset(
+            "ApexSenseBridge-Setup.exe", officialUrl),
+            "the exact official setup asset should be accepted");
+        Assert(!ReleaseSecurity.IsExpectedSetupAsset(
+            "ApexSenseBridgeTray.exe", officialUrl),
+            "a different release executable must be rejected");
+        Assert(!ReleaseSecurity.IsExpectedSetupAsset(
+            "ApexSenseBridge-Setup.exe",
+            "https://github.com/SomeoneElse/ApexSenseBridge/releases/download/v0.6.3/ApexSenseBridge-Setup.exe"),
+            "a setup asset from another repository must be rejected");
+        Assert(!ReleaseSecurity.IsExpectedSetupAsset(
+            "ApexSenseBridge-Setup.exe",
+            "http://github.com/ReynArts/ApexSenseBridge/releases/download/v0.6.3/ApexSenseBridge-Setup.exe"),
+            "an insecure download URL must be rejected");
+        Assert(!ReleaseSecurity.IsExpectedSetupAsset(
+            "ApexSenseBridge-Setup.exe",
+            "https://github.com.evil.example/ReynArts/ApexSenseBridge/releases/download/v0.6.3/ApexSenseBridge-Setup.exe"),
+            "a lookalike GitHub host must be rejected");
     }
 
     private static void TestStableLearningResolutionExportAndDeletion(string root)

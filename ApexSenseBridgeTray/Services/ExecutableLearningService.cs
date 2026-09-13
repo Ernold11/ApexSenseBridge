@@ -293,13 +293,14 @@ namespace ApexSenseBridgeTray.Services
 
                 if (deleted > 0)
                 {
+                    Interlocked.Increment(ref persistenceDirty);
                     Volatile.Write(ref snapshot, replacement);
                 }
             }
 
             if (deleted > 0)
             {
-                SchedulePersistence();
+                ThreadPool.QueueUserWorkItem(_ => PersistCurrentSnapshot());
                 RaiseBindingsChanged();
             }
             else if (pendingChanged)
@@ -460,6 +461,10 @@ namespace ApexSenseBridgeTray.Services
 
                 replacement[observation.ExecutablePath] = validated;
                 TrimToCapacity(replacement);
+                // Mark the cache dirty before publishing the new snapshot.
+                // Dispose synchronizes on mutationLock, so it can no longer
+                // observe the learned binding before seeing that it must flush.
+                Interlocked.Increment(ref persistenceDirty);
                 Volatile.Write(ref snapshot, replacement);
             }
 
@@ -469,7 +474,7 @@ namespace ApexSenseBridgeTray.Services
                 observation.ProcessId,
                 observation.GameTitle,
                 observation.ExecutablePath));
-            SchedulePersistence();
+            ThreadPool.QueueUserWorkItem(_ => PersistCurrentSnapshot());
             RaiseBindingsChanged();
         }
 
@@ -558,21 +563,24 @@ namespace ApexSenseBridgeTray.Services
             return result;
         }
 
-        private void SchedulePersistence()
-        {
-            Interlocked.Increment(ref persistenceDirty);
-            ThreadPool.QueueUserWorkItem(_ => PersistCurrentSnapshot());
-        }
-
         private void PersistCurrentSnapshot()
         {
             lock (persistenceLock)
             {
-                var dirtyGeneration = Volatile.Read(ref persistenceDirty);
+                int dirtyGeneration;
+                Dictionary<string, LearnedExecutableBinding> current;
+                // Capture the dirty generation and published immutable snapshot
+                // under the same lock used by mutations. A queued writer can no
+                // longer persist the previous snapshot and clear a newer change.
+                lock (mutationLock)
+                {
+                    dirtyGeneration = Volatile.Read(ref persistenceDirty);
+                    if (dirtyGeneration == 0) return;
+                    current = Volatile.Read(ref snapshot);
+                }
                 var tempPath = storagePath + ".tmp";
                 try
                 {
-                    var current = Volatile.Read(ref snapshot);
                     var json = BuildLocalJson(current.Values);
                     var directory = Path.GetDirectoryName(storagePath);
                     if (!string.IsNullOrWhiteSpace(directory) && !Directory.Exists(directory))

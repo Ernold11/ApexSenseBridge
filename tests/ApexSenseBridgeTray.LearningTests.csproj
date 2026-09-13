@@ -28,6 +28,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="tray_learning_tests.cs" />
+    <Compile Include="..\shared\ReleaseSecurity.cs">
+      <Link>Production\ReleaseSecurity.cs</Link>
+    </Compile>
     <Compile Include="..\ApexSenseBridgeTray\Models\LearnedExecutableBinding.cs">
       <Link>Production\LearnedExecutableBinding.cs</Link>
     </Compile>

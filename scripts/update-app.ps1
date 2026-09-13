@@ -41,7 +41,7 @@ if ($installedVersion -eq "0.0.0") {
 }
 
 if ($installedVersion -eq "0.0.0") {
-    $installedVersion = "0.6.2"
+    $installedVersion = "0.6.3"
 }
 
 Write-Host "Installed Version : v$installedVersion"
@@ -91,7 +91,10 @@ if ($CheckOnly) {
 }
 
 # 4. Find installer asset in the release
-$installerAsset = $release.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
+$installerAsset = $release.assets | Where-Object {
+    $_.name -eq "ApexSenseBridge-Setup.exe" -and
+    $_.browser_download_url -match '^https://github\.com/ReynArts/ApexSenseBridge/releases/download/'
+} | Select-Object -First 1
 
 if (-not $installerAsset) {
     Write-Warning "No installer .exe found in the latest release assets."
@@ -101,11 +104,50 @@ if (-not $installerAsset) {
 }
 
 $downloadUrl = $installerAsset.browser_download_url
-$tempInstaller = Join-Path $env:TEMP "ApexSenseBridge-Setup-$latestTag.exe"
+$tempInstaller = Join-Path $env:TEMP `
+    ("ApexSenseBridge-Setup-{0}-{1}.exe" -f $latestTag, [Guid]::NewGuid().ToString("N"))
 
 Write-Host "Downloading $downloadUrl..." -ForegroundColor Cyan
 Invoke-WebRequest -Uri $downloadUrl -OutFile $tempInstaller -Headers $headers -UseBasicParsing
 Write-Host "Download complete: $tempInstaller" -ForegroundColor Green
+
+$signature = Get-AuthenticodeSignature -LiteralPath $tempInstaller
+if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+    Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+    throw "Downloaded setup has no valid trusted Authenticode signature ($($signature.Status))."
+}
+
+function Test-SameReleaseVersion([string]$v1, [string]$v2) {
+    try {
+        $a = [System.Version]::Parse($v1.TrimStart('v', 'V'))
+        $b = [System.Version]::Parse($v2.TrimStart('v', 'V'))
+        return $a.Major -eq $b.Major -and
+               $a.Minor -eq $b.Minor -and
+               $a.Build -eq $b.Build
+    } catch {
+        return $false
+    }
+}
+$setupInfo = (Get-Item -LiteralPath $tempInstaller).VersionInfo
+$setupVersion = $setupInfo.ProductVersion
+if ($setupInfo.ProductName -ne "ApexSenseBridge") {
+    Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+    throw "Downloaded executable is not an ApexSenseBridge setup."
+}
+if (-not (Test-SameReleaseVersion $setupVersion $latestTag)) {
+    Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+    throw "Downloaded setup version '$setupVersion' does not match release '$latestTag'."
+}
+
+$installedExecutable = Join-Path ${env:ProgramFiles} "ApexSenseBridge\ApexSenseBridge.exe"
+if (Test-Path -LiteralPath $installedExecutable) {
+    $installedSignature = Get-AuthenticodeSignature -LiteralPath $installedExecutable
+    if ($installedSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        $installedSignature.SignerCertificate.Subject -ne $signature.SignerCertificate.Subject) {
+        Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+        throw "Downloaded setup publisher differs from the installed ApexSenseBridge publisher."
+    }
+}
 
 # 5. Execute installer
 Write-Host "Launching installer..." -ForegroundColor Cyan

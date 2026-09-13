@@ -108,6 +108,8 @@ ApexSenseBridge-PROJECT_BRIEF_CODEX.md
 *.notes
 notes/
 scratch/
+work/
+tools/research/
 TODO.local*
 *.local.json
 *.local.ps1

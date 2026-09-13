@@ -1,5 +1,6 @@
 using Playnite.SDK;
 using Playnite.SDK.Data;
+using ApexSenseBridge.Security;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -159,8 +160,8 @@ namespace ApexSenseBridge
                     if (release.Assets != null)
                     {
                         var setupAsset = release.Assets.FirstOrDefault(a =>
-                            a.Name.EndsWith("-Setup.exe", StringComparison.OrdinalIgnoreCase) ||
-                            a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+                            ReleaseSecurity.IsExpectedSetupAsset(
+                                a.Name, a.BrowserDownloadUrl));
                         if (setupAsset != null)
                         {
                             result.SetupDownloadUrl = setupAsset.BrowserDownloadUrl;
@@ -228,6 +229,19 @@ namespace ApexSenseBridge
                 }
             }
 
+            string verificationError;
+            if (!ReleaseSecurity.VerifyInstaller(
+                targetFile,
+                tagName,
+                Assembly.GetExecutingAssembly().Location,
+                out verificationError))
+            {
+                try { File.Delete(targetFile); } catch { }
+                throw new InvalidDataException(
+                    "Le programme d'installation téléchargé n'a pas pu être vérifié : " +
+                    verificationError);
+            }
+
             return targetFile;
         }
 
@@ -243,6 +257,18 @@ namespace ApexSenseBridge
 
             try
             {
+                string verificationError;
+                if (!ReleaseSecurity.VerifyInstaller(
+                    setupFilePath,
+                    null,
+                    Assembly.GetExecutingAssembly().Location,
+                    out verificationError))
+                {
+                    errorMessage = "L'identité du programme d'installation n'a pas pu être vérifiée : " +
+                        verificationError;
+                    return false;
+                }
+
                 // Launch Inno Setup with silent arguments:
                 // /SILENT : Displays only the progress dialog
                 // /VERYSILENT : No wizard or progress window at all
