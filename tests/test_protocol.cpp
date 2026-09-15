@@ -4,6 +4,7 @@
 
 #include "flydigi/Apex4Input.h"
 #include "flydigi/Apex4Protocol.h"
+#include "flydigi/Apex5Input.h"
 #include "flydigi/Apex5Protocol.h"
 
 #include <cassert>
@@ -132,6 +133,35 @@ int main() {
     assert((*applyProfile)[6] == 0xA7);
     assert(!buildApplyProfile(4));
 
+    const auto readTransport = buildInputTransportStatusRequest();
+    assert(readTransport[3] == kCmdReadInputTransport);
+    assert(readTransport[4] == 2);
+    assert(readTransport[5] == 0x12);
+    const auto enableRaw = buildSetInputTransport(false, true);
+    assert(enableRaw[3] == kCmdSetInputTransport);
+    assert(enableRaw[4] == 7);
+    assert(enableRaw[5] == 0);
+    assert(enableRaw[6] == 1);
+    assert(enableRaw[7] == 0xFF && enableRaw[8] == 0xFF &&
+           enableRaw[9] == 0xFF);
+    assert(enableRaw[10] == 0x0B);
+
+    std::array<std::uint8_t, 32> transportReply{};
+    transportReply[0] = kReportIdIn;
+    transportReply[1] = kMagic0;
+    transportReply[2] = kMagic1;
+    transportReply[3] = kCmdReadInputTransport;
+    transportReply[6] = 1;
+    transportReply[7] = 0;
+    transportReply[8] = 1;
+    const auto transport = parseInputTransportStatus(transportReply);
+    assert(transport);
+    assert(transport->controllerData && !transport->rawData &&
+           transport->keyboardData && !transport->mouseData &&
+           !transport->thirdPartyControl);
+    transportReply[7] = 2;
+    assert(!parseInputTransportStatus(transportReply));
+
     std::array<std::uint8_t, 32> profileReply{};
     profileReply[0] = kReportIdIn;
     profileReply[1] = kMagic0;
@@ -153,6 +183,36 @@ int main() {
     assert(switchProfile->switchBank);
     profileReply[6] = 8;
     assert(!parseProfileStatus(profileReply));
+
+    std::array<std::uint8_t, 32> apex5Input{};
+    apex5Input[0] = kReportIdIn;
+    apex5Input[1] = kMagic0;
+    apex5Input[2] = kMagic1;
+    apex5Input[3] = kCmdOperatorData;
+    apex5Input[4] = 0x00; apex5Input[5] = 0x80; // LX -32768.
+    apex5Input[6] = 0x00; apex5Input[7] = 0x80; // LY -32768.
+    apex5Input[8] = 0xFF; apex5Input[9] = 0x7F; // RX +32767.
+    apex5Input[10] = 0xFF; apex5Input[11] = 0x7F; // RY +32767.
+    apex5Input[12] = 0x01 | 0x02 | 0x10 | 0x80;
+    apex5Input[13] = 0x01 | 0x04;
+    apex5Input[15] = 0x08;
+    apex5Input[16] = 40;
+    apex5Input[17] = 255;
+    const auto decodedApex5 = decodeApex5InputReport(apex5Input);
+    assert(decodedApex5);
+    assert(decodedApex5->lx == 0 && decodedApex5->ly == 255);
+    assert(decodedApex5->rx == 255 && decodedApex5->ry == 0);
+    assert(decodedApex5->l2 == 40 && decodedApex5->r2 == 255);
+    assert(decodedApex5->dpad == (0x01 | 0x08));
+    assert((decodedApex5->buttons & dualsense::button::kPs) != 0);
+    assert((decodedApex5->buttons & dualsense::button::kCross) != 0);
+    assert((decodedApex5->buttons & dualsense::button::kSquare) != 0);
+    assert((decodedApex5->buttons & dualsense::button::kTriangle) != 0);
+    assert((decodedApex5->buttons & dualsense::button::kL1) != 0);
+    assert((decodedApex5->buttons & dualsense::button::kL2) != 0);
+    assert((decodedApex5->buttons & dualsense::button::kR2) != 0);
+    apex5Input[3] = 0;
+    assert(!decodeApex5InputReport(apex5Input));
     profileReply[0] = 0xEF;
     assert(!isProfileCommandReply(profileReply, kCmdProfileStatus));
     assert(!parseProfileStatus(profileReply));

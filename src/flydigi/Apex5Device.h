@@ -48,6 +48,10 @@ public:
     bool stopRumble(std::string& error);
     bool readProfileStatus(ProfileStatus& status, std::string& error);
     bool applyProfile(std::uint8_t slot, std::string& error);
+    bool readInputTransportStatus(InputTransportStatus& status,
+                                  std::string& error);
+    bool setInputTransport(bool controllerData, bool rawData,
+                           std::string& error);
 
 private:
     [[nodiscard]] bool mayWriteEffects(std::string& error) const;

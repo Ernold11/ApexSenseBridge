@@ -10,6 +10,8 @@
 
 #include "flydigi/Apex4Input.h"
 #include "flydigi/Apex4Protocol.h"
+#include "flydigi/Apex5Input.h"
+#include "flydigi/Apex5Protocol.h"
 #include "platform/HidTransport.h"
 #include "platform/XInputGamepad.h"
 #include "platform/XInputMapping.h"
@@ -591,6 +593,150 @@ private:
     PhysicalInputSourceStats stats_{};
 };
 
+class Apex5VendorPhysicalInputSource final : public PhysicalInputSource {
+public:
+    static std::unique_ptr<Apex5VendorPhysicalInputSource> open(
+        const HidDeviceInfo& vendorInterface, std::string& error) {
+        if (vendorInterface.vendorId != flydigi::kVendorId ||
+            !flydigi::isControllerProduct(vendorInterface.productId) ||
+            vendorInterface.usagePage != flydigi::kVendorUsagePage ||
+            vendorInterface.inputReportLength < 18) {
+            error = "The selected interface is not a complete Apex 5 vendor input stream.";
+            return {};
+        }
+
+        HANDLE handle = CreateFileW(
+            vendorInterface.path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const auto code = GetLastError();
+            error = "Could not open the selected Apex 5 vendor input stream (" +
+                    std::to_string(code) + ": " + win32Error(code) + ").";
+            return {};
+        }
+
+        auto source = std::unique_ptr<Apex5VendorPhysicalInputSource>(
+            new Apex5VendorPhysicalInputSource(vendorInterface, handle));
+        if (!source->event_) {
+            error = "Could not create the Apex 5 vendor input event.";
+            return {};
+        }
+        return source;
+    }
+
+    ~Apex5VendorPhysicalInputSource() override {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            if (readPending_) {
+                CancelIoEx(handle_, &overlapped_);
+                DWORD ignored = 0;
+                (void)GetOverlappedResult(handle_, &overlapped_, &ignored, TRUE);
+            }
+            CloseHandle(handle_);
+        }
+        if (event_) CloseHandle(event_);
+    }
+
+    PhysicalInputStatus waitForState(
+        dualsense::DualSenseInputState& state,
+        std::chrono::milliseconds timeout,
+        std::string& error) override {
+        error.clear();
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+        for (;;) {
+            if (!ensureReadPending(error)) return PhysicalInputStatus::Error;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                ++stats_.timeouts;
+                return PhysicalInputStatus::Timeout;
+            }
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now);
+            if (remaining.count() == 0) remaining = std::chrono::milliseconds(1);
+
+            const DWORD waitResult = WaitForSingleObject(
+                event_, waitMilliseconds(remaining));
+            if (waitResult == WAIT_TIMEOUT) {
+                ++stats_.timeouts;
+                return PhysicalInputStatus::Timeout;
+            }
+            if (waitResult != WAIT_OBJECT_0) {
+                const auto code = GetLastError();
+                error = "Waiting for an Apex 5 vendor input report failed (" +
+                        std::to_string(code) + ": " + win32Error(code) + ").";
+                return PhysicalInputStatus::Error;
+            }
+
+            DWORD bytesRead = 0;
+            readPending_ = false;
+            if (!GetOverlappedResult(handle_, &overlapped_, &bytesRead, FALSE)) {
+                const auto code = GetLastError();
+                if (code == ERROR_DEVICE_NOT_CONNECTED || code == ERROR_INVALID_HANDLE ||
+                    code == ERROR_OPERATION_ABORTED) {
+                    error = "The physical Apex 5 vendor input stream disconnected.";
+                    return PhysicalInputStatus::Disconnected;
+                }
+                error = "Completing the Apex 5 vendor input report failed (" +
+                        std::to_string(code) + ": " + win32Error(code) + ").";
+                return PhysicalInputStatus::Error;
+            }
+            ++stats_.reports;
+
+            const auto decoded = flydigi::decodeApex5InputReport(
+                std::span<const std::uint8_t>(report_.data(), bytesRead));
+            if (!decoded) {
+                // Command acknowledgements and status notifications share the
+                // vendor stream; only 0xEF carries a complete controller state.
+                continue;
+            }
+            state = *decoded;
+            return PhysicalInputStatus::State;
+        }
+    }
+
+    std::string_view backendName() const noexcept override {
+        return "apex5-v2-hid-event";
+    }
+    bool eventDriven() const noexcept override { return true; }
+    PhysicalInputSourceStats stats() const noexcept override { return stats_; }
+
+private:
+    Apex5VendorPhysicalInputSource(const HidDeviceInfo& info, HANDLE handle)
+        : handle_(handle), report_(info.inputReportLength, 0) {
+        event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        overlapped_.hEvent = event_;
+    }
+
+    bool ensureReadPending(std::string& error) {
+        if (readPending_) return true;
+        ResetEvent(event_);
+        std::fill(report_.begin(), report_.end(), std::uint8_t{0});
+        if (ReadFile(handle_, report_.data(), static_cast<DWORD>(report_.size()),
+                     nullptr, &overlapped_)) {
+            SetEvent(event_);
+            readPending_ = true;
+            return true;
+        }
+        const auto code = GetLastError();
+        if (code == ERROR_IO_PENDING) {
+            readPending_ = true;
+            return true;
+        }
+        error = "Starting the Apex 5 vendor input read failed (" +
+                std::to_string(code) + ": " + win32Error(code) + ").";
+        return false;
+    }
+
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    HANDLE event_ = nullptr;
+    OVERLAPPED overlapped_{};
+    bool readPending_ = false;
+    std::vector<std::uint8_t> report_;
+    PhysicalInputSourceStats stats_{};
+};
+
 class XInputPhysicalInputSource final : public PhysicalInputSource {
 public:
     explicit XInputPhysicalInputSource(std::unique_ptr<XInputGamepad> gamepad)
@@ -645,6 +791,18 @@ std::unique_ptr<PhysicalInputSource> openPhysicalInputSource(
     std::optional<unsigned int> requestedXInputIndex,
     std::string& error) {
     if (!requestedXInputIndex) {
+        if (apexVendorInterface.vendorId == flydigi::kVendorId &&
+            flydigi::isControllerProduct(apexVendorInterface.productId)) {
+            std::string apex5Error;
+            auto apex5 = Apex5VendorPhysicalInputSource::open(
+                apexVendorInterface, apex5Error);
+            if (apex5) {
+                error.clear();
+                return apex5;
+            }
+            error = "Apex 5 V2 vendor input unavailable (" + apex5Error + "); ";
+        }
+
         if (flydigi::isApex4Product(
                 apexVendorInterface.vendorId, apexVendorInterface.productId)) {
             std::string apex4Error;

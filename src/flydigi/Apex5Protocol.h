@@ -20,7 +20,10 @@ constexpr std::uint8_t kReportIdIn = 0x04;
 constexpr std::uint8_t kMagic0 = 0x5A;
 constexpr std::uint8_t kMagic1 = 0xA5;
 constexpr std::uint8_t kCmdGetInfo = 0x01;
+constexpr std::uint8_t kCmdReadInputTransport = 0x10;
+constexpr std::uint8_t kCmdSetInputTransport = 0x11;
 constexpr std::uint8_t kCmdSetRumble = 0x12;
+constexpr std::uint8_t kCmdOperatorData = 0xEF;
 constexpr std::uint8_t kCmdSetForceTrigger = 81;
 constexpr std::uint8_t kCmdProfileStatus = 0xA1;
 constexpr std::uint8_t kCmdApplyProfile = 0xA2;
@@ -35,6 +38,14 @@ struct ProfileStatus {
     bool switchBank = false;
 };
 
+struct InputTransportStatus {
+    bool controllerData = true;
+    bool rawData = false;
+    bool keyboardData = false;
+    bool mouseData = false;
+    bool thirdPartyControl = false;
+};
+
 [[nodiscard]] Report buildForceTrigger(const TriggerEffect& effect, bool apply = true);
 [[nodiscard]] Report buildForceTriggerRaw(const ForceTriggerCommand& command,
                                           bool apply = true);
@@ -43,9 +54,13 @@ struct ProfileStatus {
                                  std::uint8_t highFrequencyMotor);
 [[nodiscard]] Report buildProfileStatusRequest();
 [[nodiscard]] std::optional<Report> buildApplyProfile(std::uint8_t slot);
+[[nodiscard]] Report buildInputTransportStatusRequest();
+[[nodiscard]] Report buildSetInputTransport(bool controllerData, bool rawData);
 [[nodiscard]] bool isProfileCommandReply(
     std::span<const std::uint8_t> report, std::uint8_t command) noexcept;
 [[nodiscard]] std::optional<ProfileStatus> parseProfileStatus(
+    std::span<const std::uint8_t> report) noexcept;
+[[nodiscard]] std::optional<InputTransportStatus> parseInputTransportStatus(
     std::span<const std::uint8_t> report) noexcept;
 [[nodiscard]] bool isControllerProduct(std::uint16_t productId) noexcept;
 

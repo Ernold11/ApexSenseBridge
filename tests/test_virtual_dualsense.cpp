@@ -5,13 +5,209 @@
 #include "dualsense/DualSenseFeedback.h"
 #include "dualsense/DualSenseFirmware.h"
 #include "dualsense/DualSenseInput.h"
+#include "dualsense/VirtualDualSenseStartup.h"
 #include "dualsense/ViiperProtocol.h"
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+class FakeVirtualDualSense final : public asb::dualsense::VirtualDualSense {
+public:
+    bool open(std::string& error, FeedbackHandler handler) override {
+        ++openCalls;
+        handler_ = std::move(handler);
+        const bool succeeds = openCalls > openFailures;
+        connected_ = succeeds;
+        if (!succeeds) error = "synthetic open failure";
+        return succeeds;
+    }
+
+    void close() noexcept override {
+        ++closeCalls;
+        connected_ = false;
+        handler_ = {};
+    }
+
+    bool updateInput(const asb::dualsense::DualSenseInputState& state,
+                     std::string& error) override {
+        ++updateCalls;
+        lastInput = state;
+        if (updateFails) {
+            error = "synthetic input failure";
+            return false;
+        }
+        return connected_;
+    }
+
+    [[nodiscard]] bool connected() const noexcept override { return connected_; }
+
+    asb::dualsense::VirtualDualSenseStats stats() const override {
+        asb::dualsense::VirtualDualSenseStats result{};
+        result.connected = connected_;
+        return result;
+    }
+
+    std::size_t openFailures = 0;
+    bool updateFails = false;
+    std::size_t openCalls = 0;
+    std::size_t closeCalls = 0;
+    std::size_t updateCalls = 0;
+    asb::dualsense::DualSenseInputState lastInput{};
+
+private:
+    bool connected_ = false;
+    FeedbackHandler handler_;
+};
+
+void testVerifiedStartupRetriesReadinessFailure() {
+    using namespace asb::dualsense;
+
+    FakeVirtualDualSense backend;
+    DualSenseInputState initial{};
+    initial.lx = 0x31;
+    initial.r2 = 0x72;
+    std::size_t probeCalls = 0;
+    std::size_t removalWaits = 0;
+    VirtualDualSenseStartupResult result{};
+    std::string error;
+
+    const bool started = startVerifiedVirtualDualSense(
+        backend, initial, {},
+        [&probeCalls](std::string& probeError)
+            -> std::optional<DualSenseFirmwareInfo> {
+            ++probeCalls;
+            if (probeCalls == 1) {
+                probeError = "synthetic HID publication timeout";
+                return std::nullopt;
+            }
+            DualSenseFirmwareInfo firmware{};
+            firmware.updateVersion = 0x0630;
+            return firmware;
+        },
+        [&removalWaits](std::string&) {
+            ++removalWaits;
+            return true;
+        },
+        2, result, error);
+
+    assert(started);
+    assert(error.empty());
+    assert(result.failure == VirtualDualSenseStartupFailure::None);
+    assert(result.attempts == 2);
+    assert(result.firmware && result.firmware->updateVersion == 0x0630);
+    assert(result.inputReadyAt != std::chrono::steady_clock::time_point{});
+    assert(result.verifiedAt >= result.inputReadyAt);
+    assert(backend.openCalls == 2);
+    assert(backend.updateCalls == 2);
+    assert(backend.closeCalls == 1);
+    assert(backend.connected());
+    assert(backend.lastInput == initial);
+    assert(probeCalls == 2);
+    assert(removalWaits == 1);
+}
+
+void testVerifiedStartupFailsClosed() {
+    using namespace asb::dualsense;
+
+    FakeVirtualDualSense backend;
+    std::size_t probeCalls = 0;
+    std::size_t removalWaits = 0;
+    VirtualDualSenseStartupResult result{};
+    std::string error;
+    const bool started = startVerifiedVirtualDualSense(
+        backend, {}, {},
+        [&probeCalls](std::string& probeError)
+            -> std::optional<DualSenseFirmwareInfo> {
+            ++probeCalls;
+            probeError = "synthetic HID publication timeout";
+            return std::nullopt;
+        },
+        [&removalWaits](std::string&) {
+            ++removalWaits;
+            return true;
+        },
+        2, result, error);
+
+    assert(!started);
+    assert(!backend.connected());
+    assert(result.failure == VirtualDualSenseStartupFailure::ReadinessVerification);
+    assert(result.attempts == 2);
+    assert(!result.firmware);
+    assert(error.find("after 2 attempts") != std::string::npos);
+    assert(error.find("synthetic HID publication timeout") != std::string::npos);
+    assert(backend.openCalls == 2);
+    assert(backend.updateCalls == 2);
+    assert(backend.closeCalls == 2);
+    assert(probeCalls == 2);
+    assert(removalWaits == 1);
+}
+
+void testVerifiedStartupStopsWhenRemovalFails() {
+    using namespace asb::dualsense;
+
+    FakeVirtualDualSense backend;
+    VirtualDualSenseStartupResult result{};
+    std::string error;
+    const bool started = startVerifiedVirtualDualSense(
+        backend, {}, {},
+        [](std::string& probeError) -> std::optional<DualSenseFirmwareInfo> {
+            probeError = "synthetic readiness failure";
+            return std::nullopt;
+        },
+        [](std::string& removalError) {
+            removalError = "synthetic removal timeout";
+            return false;
+        },
+        2, result, error);
+
+    assert(!started);
+    assert(!backend.connected());
+    assert(result.failure == VirtualDualSenseStartupFailure::DeviceRemoval);
+    assert(result.attempts == 1);
+    assert(error.find("could not be removed") != std::string::npos);
+    assert(error.find("synthetic removal timeout") != std::string::npos);
+    assert(backend.openCalls == 1);
+    assert(backend.updateCalls == 1);
+    assert(backend.closeCalls == 1);
+}
+
+void testVerifiedStartupDoesNotRetryHardFailures() {
+    using namespace asb::dualsense;
+
+    VirtualDualSenseStartupResult result{};
+    std::string error;
+    FakeVirtualDualSense openFailure;
+    openFailure.openFailures = 1;
+    assert(!startVerifiedVirtualDualSense(
+        openFailure, {}, {},
+        [](std::string&) { return std::optional<DualSenseFirmwareInfo>{}; },
+        [](std::string&) { return true; }, 2, result, error));
+    assert(result.failure == VirtualDualSenseStartupFailure::BackendOpen);
+    assert(openFailure.openCalls == 1);
+    assert(openFailure.updateCalls == 0);
+    assert(openFailure.closeCalls == 1);
+
+    FakeVirtualDualSense inputFailure;
+    inputFailure.updateFails = true;
+    assert(!startVerifiedVirtualDualSense(
+        inputFailure, {}, {},
+        [](std::string&) { return std::optional<DualSenseFirmwareInfo>{}; },
+        [](std::string&) { return true; }, 2, result, error));
+    assert(result.failure == VirtualDualSenseStartupFailure::InitialInput);
+    assert(inputFailure.openCalls == 1);
+    assert(inputFailure.updateCalls == 1);
+    assert(inputFailure.closeCalls == 1);
+}
+
+} // namespace
 
 int main() {
     using namespace asb::dualsense;
@@ -174,6 +370,11 @@ int main() {
     assert(!viiper::isDualSenseCompatibleVersion("v0.7.0-notasb1"));
     assert(viiper::isDualSenseCompatibleVersion("v0.7.0-asb1"));
     assert(viiper::isDualSenseCompatibleVersion("v0.8.0-asb2"));
+
+    testVerifiedStartupRetriesReadinessFailure();
+    testVerifiedStartupFailsClosed();
+    testVerifiedStartupStopsWhenRemovalFails();
+    testVerifiedStartupDoesNotRetryHardFailures();
 
     std::uint32_t busId = 0;
     std::string deviceId;

@@ -23,6 +23,10 @@ std::string narrowAscii(const std::wstring& value);
 std::string hex16(std::uint16_t value);
 bool isDualSenseGamepadInterface(const asb::HidDeviceInfo& info);
 std::vector<std::wstring> snapshotDualSensePaths();
+bool waitForNewVirtualDualSenseRemoval(
+    const std::vector<std::wstring>& preexistingPaths,
+    std::chrono::milliseconds timeout,
+    std::string& error);
 std::optional<asb::dualsense::DualSenseFirmwareInfo> readNewVirtualDualSenseFirmware(
     const std::vector<std::wstring>& preexistingPaths,
     std::chrono::milliseconds timeout,

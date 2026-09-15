@@ -25,6 +25,9 @@ public:
                   std::string_view sessionToken,
                   std::optional<std::uint8_t> originalApexProfile,
                   std::string& error);
+    bool armApexInputTransportRestore(bool originalControllerData,
+                                      bool originalRawData,
+                                      std::string& error) noexcept;
     bool confirmApexProfileRestored(std::string& error) noexcept;
     bool restore(std::string& error) noexcept;
     [[nodiscard]] bool active() const noexcept;

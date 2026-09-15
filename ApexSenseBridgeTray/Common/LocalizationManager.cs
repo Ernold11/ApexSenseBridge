@@ -60,6 +60,11 @@ namespace ApexSenseBridgeTray.Common
             { "Loc_BtnExcludeCurrent", "Exclude this game" },
             { "Loc_MsgExcluded", "“{0}” has been excluded from automatic detection." },
             { "Loc_ManualBridgeGameTitle", "Forced manual bridge" },
+            { "Loc_ControllerApex4", "Flydigi APEX 4 connected" },
+            { "Loc_ControllerApex5", "Flydigi APEX 5 connected" },
+            { "Loc_ControllerDisconnected", "No APEX controller connected" },
+            { "Loc_ControllerUnsupported", "Unsupported Flydigi controller" },
+            { "Loc_ControllerUnavailable", "Controller detection unavailable" },
 
             // Auto Detect Section
             { "Loc_SectionAutoDetect", "Automatic Detection" },
@@ -157,8 +162,21 @@ namespace ApexSenseBridgeTray.Common
             { "Loc_LearnedSearchPlaceholder", "Search executable or game..." },
             { "Loc_LearnedEmptySubtitle", "When a game runs with a stable session, it will appear here for instant startup." },
             { "Loc_LearnedEmptyPendingSingular", "A game was detected. Keep playing while its executable is validated." },
-            { "Loc_LearnedEmptyPendingPlural", "{0} game processes were detected. Keep playing while their executables are validated." },
-            { "Loc_BtnDeleteSingle", "Delete" }
+            { "Loc_BtnDeleteSingle", "Delete" },
+
+            // Navigation Tabs
+            { "Loc_NavDashboard", "Dashboard" },
+            { "Loc_NavSettings", "Settings" },
+            { "Loc_DetailTitle", "Game Details" },
+            { "Loc_DetailNoGame", "Select a game to view details" },
+
+            // Gamepad HUD
+            { "Loc_Gamepad_Tabs", "Tabs" },
+            { "Loc_Gamepad_Select", "Select" },
+            { "Loc_Gamepad_Back", "Close" },
+            { "Loc_Gamepad_ToggleExclude", "Exclude" },
+            { "Loc_Gamepad_Search", "Search" },
+            { "Loc_Gamepad_Scroll", "Scroll" }
         };
 
         private static readonly Dictionary<string, string> FrenchStrings = new Dictionary<string, string>
@@ -202,6 +220,11 @@ namespace ApexSenseBridgeTray.Common
             { "Loc_BtnExcludeCurrent", "Exclure ce jeu" },
             { "Loc_MsgExcluded", "« {0} » a été exclu de la détection automatique." },
             { "Loc_ManualBridgeGameTitle", "Pont manuel forcé" },
+            { "Loc_ControllerApex4", "Flydigi APEX 4 connectée" },
+            { "Loc_ControllerApex5", "Flydigi APEX 5 connectée" },
+            { "Loc_ControllerDisconnected", "Aucune manette APEX connectée" },
+            { "Loc_ControllerUnsupported", "Manette Flydigi non prise en charge" },
+            { "Loc_ControllerUnavailable", "Détection de la manette indisponible" },
 
             // Auto Detect Section
             { "Loc_SectionAutoDetect", "Détection automatique" },
@@ -299,7 +322,21 @@ namespace ApexSenseBridgeTray.Common
             { "Loc_LearnedEmptySubtitle", "Lorsqu'un jeu tourne en session stable, son association apparaîtra ici." },
             { "Loc_LearnedEmptyPendingSingular", "Un jeu a été détecté. Continue à jouer pendant la validation de son exécutable." },
             { "Loc_LearnedEmptyPendingPlural", "{0} processus de jeu ont été détectés. Continue à jouer pendant la validation de leurs exécutables." },
-            { "Loc_BtnDeleteSingle", "Supprimer" }
+            { "Loc_BtnDeleteSingle", "Supprimer" },
+
+            // Navigation Tabs
+            { "Loc_NavDashboard", "Accueil" },
+            { "Loc_NavSettings", "Paramètres" },
+            { "Loc_DetailTitle", "Détails du jeu" },
+            { "Loc_DetailNoGame", "Sélectionnez un jeu pour afficher ses détails" },
+
+            // Gamepad HUD
+            { "Loc_Gamepad_Tabs", "Onglets" },
+            { "Loc_Gamepad_Select", "Valider" },
+            { "Loc_Gamepad_Back", "Fermer" },
+            { "Loc_Gamepad_ToggleExclude", "Exclure" },
+            { "Loc_Gamepad_Search", "Rechercher" },
+            { "Loc_Gamepad_Scroll", "Défiler" }
         };
 
         public static void Initialize(string preferredLanguage)

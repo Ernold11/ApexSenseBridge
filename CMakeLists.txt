@@ -19,6 +19,7 @@ add_library(asb_core STATIC
     src/dualsense/DualSenseFeedback.cpp
     src/dualsense/DualSenseFirmware.cpp
     src/dualsense/DualSenseInput.cpp
+    src/dualsense/VirtualDualSenseStartup.cpp
     src/dualsense/TouchpadGestureProfile.cpp
     src/dualsense/ViewTouchpadGesture.cpp
     src/dualsense/AdaptiveTriggerTranslation.cpp
@@ -33,6 +34,7 @@ add_library(asb_core STATIC
     src/flydigi/Apex4Input.cpp
     src/flydigi/Apex4Protocol.cpp
     src/flydigi/Apex5Identity.cpp
+    src/flydigi/Apex5Input.cpp
     src/flydigi/Apex5Protocol.cpp
     src/flydigi/Apex5Device.cpp
 )
@@ -115,6 +117,7 @@ if(BUILD_TESTING)
         tests/test_protocol.cpp
         src/flydigi/Apex4Input.cpp
         src/flydigi/Apex4Protocol.cpp
+        src/flydigi/Apex5Input.cpp
         src/flydigi/Apex5Protocol.cpp
         src/platform/XInputMapping.cpp
     )
@@ -152,6 +155,7 @@ if(BUILD_TESTING)
         src/dualsense/DualSenseFeedback.cpp
         src/dualsense/DualSenseFirmware.cpp
         src/dualsense/DualSenseInput.cpp
+        src/dualsense/VirtualDualSenseStartup.cpp
         src/dualsense/ViiperProtocol.cpp
     )
     target_include_directories(ApexSenseBridgeVirtualDualSenseTests PRIVATE src)

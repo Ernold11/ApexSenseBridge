@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -88,6 +89,26 @@ bool isDualSenseGamepadInterface(const asb::HidDeviceInfo& info) {
            info.featureReportLength >= 46;
 }
 
+namespace {
+
+bool sameDevicePath(std::wstring_view left, std::wstring_view right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(),
+                      [](wchar_t lhs, wchar_t rhs) {
+                          return std::towupper(lhs) == std::towupper(rhs);
+                      });
+}
+
+bool wasPresentBefore(const std::vector<std::wstring>& paths,
+                      std::wstring_view candidate) {
+    return std::any_of(paths.begin(), paths.end(),
+                       [candidate](const auto& path) {
+                           return sameDevicePath(path, candidate);
+                       });
+}
+
+} // namespace
+
 std::vector<std::wstring> snapshotDualSensePaths() {
     std::string ignored;
     const auto devices = asb::platform::enumerateHidDevices(ignored);
@@ -96,6 +117,46 @@ std::vector<std::wstring> snapshotDualSensePaths() {
         if (isDualSenseGamepadInterface(info)) paths.push_back(info.path);
     }
     return paths;
+}
+
+bool waitForNewVirtualDualSenseRemoval(
+    const std::vector<std::wstring>& preexistingPaths,
+    std::chrono::milliseconds timeout,
+    std::string& error) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::optional<std::chrono::steady_clock::time_point> absentSince;
+    do {
+        std::string enumerationError;
+        const auto devices = asb::platform::enumerateHidDevices(enumerationError);
+        if (!enumerationError.empty()) {
+            error = std::move(enumerationError);
+        } else {
+            const bool newInterfaceStillPresent = std::any_of(
+                devices.begin(), devices.end(),
+                [&preexistingPaths](const auto& info) {
+                    return isDualSenseGamepadInterface(info) &&
+                           !wasPresentBefore(preexistingPaths, info.path);
+                });
+            if (!newInterfaceStillPresent) {
+                const auto now = std::chrono::steady_clock::now();
+                if (!absentSince) absentSince = now;
+                // Require stable absence rather than a single empty PnP scan;
+                // the usbip removal notification can race the next attach.
+                if (now - *absentSince >= std::chrono::milliseconds(150)) {
+                    error.clear();
+                    return true;
+                }
+            } else {
+                absentSince.reset();
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    if (error.empty()) {
+        error = "The previous virtual DualSense HID interface remained present after cleanup.";
+    }
+    return false;
 }
 
 std::optional<asb::dualsense::DualSenseFirmwareInfo> readNewVirtualDualSenseFirmware(
@@ -112,8 +173,7 @@ std::optional<asb::dualsense::DualSenseFirmwareInfo> readNewVirtualDualSenseFirm
         if (!enumerationError.empty()) lastError = enumerationError;
         for (const auto& info : devices) {
             if (!isDualSenseGamepadInterface(info) ||
-                std::find(preexistingPaths.begin(), preexistingPaths.end(), info.path) !=
-                    preexistingPaths.end()) {
+                wasPresentBefore(preexistingPaths, info.path)) {
                 continue;
             }
 

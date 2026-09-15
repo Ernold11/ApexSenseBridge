@@ -147,6 +147,21 @@ std::optional<Report> buildApplyProfile(std::uint8_t slot) {
     return buildChecksummedCommand(kCmdApplyProfile, payload);
 }
 
+Report buildInputTransportStatusRequest() {
+    return buildChecksummedCommand(kCmdReadInputTransport, {});
+}
+
+Report buildSetInputTransport(bool controllerData, bool rawData) {
+    // Keyboard, mouse and third-party ownership are deliberately left
+    // unchanged. 0xFF is Flydigi's "keep current value" sentinel.
+    const std::array<std::uint8_t, 5> payload{
+        static_cast<std::uint8_t>(controllerData ? 1 : 0),
+        static_cast<std::uint8_t>(rawData ? 1 : 0),
+        0xFF, 0xFF, 0xFF,
+    };
+    return buildChecksummedCommand(kCmdSetInputTransport, payload);
+}
+
 bool isProfileCommandReply(
     std::span<const std::uint8_t> report, std::uint8_t command) noexcept {
     return report.size() >= 4 &&
@@ -171,6 +186,24 @@ std::optional<ProfileStatus> parseProfileStatus(
         static_cast<std::uint8_t>(
             switchBank ? rawSlot - kProfileSlotCount : rawSlot),
         switchBank,
+    };
+}
+
+std::optional<InputTransportStatus> parseInputTransportStatus(
+    std::span<const std::uint8_t> report) noexcept {
+    if (report.size() < 11 ||
+        !isProfileCommandReply(report, kCmdReadInputTransport)) {
+        return std::nullopt;
+    }
+    for (std::size_t index = 6; index <= 10; ++index) {
+        if (report[index] > 1) return std::nullopt;
+    }
+    return InputTransportStatus{
+        report[6] != 0,
+        report[7] != 0,
+        report[8] != 0,
+        report[9] != 0,
+        report[10] != 0,
     };
 }
 

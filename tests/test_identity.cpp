@@ -87,6 +87,26 @@ public:
             reply[2] = asb::flydigi::kMagic1;
             reply[3] = asb::flydigi::kCmdApplyProfile;
             replies_.push_back(std::move(reply));
+        } else if (!silent_ && !apex4_ && report.size() > 3 &&
+                   report[3] == asb::flydigi::kCmdReadInputTransport) {
+            std::vector<std::uint8_t> reply(32, 0);
+            reply[0] = asb::flydigi::kReportIdIn;
+            reply[1] = asb::flydigi::kMagic0;
+            reply[2] = asb::flydigi::kMagic1;
+            reply[3] = asb::flydigi::kCmdReadInputTransport;
+            reply[6] = controllerData_ ? 1 : 0;
+            reply[7] = rawData_ ? 1 : 0;
+            replies_.push_back(std::move(reply));
+        } else if (!silent_ && !apex4_ && report.size() > 6 &&
+                   report[3] == asb::flydigi::kCmdSetInputTransport) {
+            controllerData_ = report[5] != 0;
+            rawData_ = report[6] != 0;
+            std::vector<std::uint8_t> reply(32, 0);
+            reply[0] = asb::flydigi::kReportIdIn;
+            reply[1] = asb::flydigi::kMagic0;
+            reply[2] = asb::flydigi::kMagic1;
+            reply[3] = asb::flydigi::kCmdSetInputTransport;
+            replies_.push_back(std::move(reply));
         }
         return true;
     }
@@ -117,6 +137,8 @@ private:
     bool apex4_ = false;
     std::size_t ignoredApex4Requests_ = 0;
     std::uint8_t activeProfile_ = 0;
+    bool controllerData_ = true;
+    bool rawData_ = false;
     std::deque<std::vector<std::uint8_t>> replies_;
 };
 
@@ -195,6 +217,14 @@ int main() {
     assert(accepted.setTrigger(effect, error));
     assert(acceptedTransport->writes.size() == 2);
     assert(acceptedTransport->writes[1][3] == kCmdSetForceTrigger);
+
+    InputTransportStatus transportStatus{};
+    assert(accepted.readInputTransportStatus(transportStatus, error));
+    assert(transportStatus.controllerData && !transportStatus.rawData);
+    assert(accepted.setInputTransport(false, true, error));
+    assert(accepted.readInputTransportStatus(transportStatus, error));
+    assert(!transportStatus.controllerData && transportStatus.rawData);
+    assert(accepted.setInputTransport(true, false, error));
 
     ProfileStatus profileStatus{};
     error.clear();

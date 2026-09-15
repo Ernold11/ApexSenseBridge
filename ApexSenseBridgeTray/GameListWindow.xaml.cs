@@ -7,12 +7,15 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
+using System.Windows.Shapes;
 
 namespace ApexSenseBridgeTray
 {
@@ -21,39 +24,102 @@ namespace ApexSenseBridgeTray
         private readonly CloudGameListService gameListService;
         private readonly TraySettings settings;
         private readonly ExecutableLearningService learningService;
-        private readonly Action learningStateChangedHandler;
+        private readonly EngineSessionManager sessionManager;
+        private readonly ProcessMonitorService monitorService;
+        private readonly UpdateCheckerService updateChecker;
+        private readonly ControllerDetectionService controllerDetection;
 
         private readonly List<GameItemViewModel> allGameViewModels = new List<GameItemViewModel>();
+        private readonly ObservableCollection<GameItemViewModel> filteredGames = new ObservableCollection<GameItemViewModel>();
         private readonly List<LearnedItemViewModel> allLearnedViewModels = new List<LearnedItemViewModel>();
+        private readonly ObservableCollection<LearnedItemViewModel> filteredLearned = new ObservableCollection<LearnedItemViewModel>();
+        private readonly ObservableCollection<GameItemViewModel> dashboardFeaturedGames = new ObservableCollection<GameItemViewModel>();
+
+        private readonly GamepadNavigationService gamepadNav;
+        private int currentTabIndex = 0;
+        private int selectedGameIndex = -1;
 
         public GameListWindow(
             CloudGameListService gameListService,
             TraySettings settings,
             ExecutableLearningService learningService = null,
-            string initialTab = "games")
+            EngineSessionManager sessionManager = null,
+            ProcessMonitorService monitorService = null,
+            UpdateCheckerService updateChecker = null,
+            string initialTab = "dashboard")
         {
             this.gameListService = gameListService;
             this.settings = settings;
             this.learningService = learningService;
+            this.sessionManager = sessionManager;
+            this.monitorService = monitorService;
+            this.updateChecker = updateChecker;
 
             InitializeComponent();
 
-            learningStateChangedHandler = () => Dispatcher.BeginInvoke(new Action(LoadLearnedItems));
+            LstGames.ItemsSource = filteredGames;
+            LstLearned.ItemsSource = filteredLearned;
+            if (LstDashboardFeatured != null) LstDashboardFeatured.ItemsSource = dashboardFeaturedGames;
+
+            gamepadNav = new GamepadNavigationService(this);
+            gamepadNav.TabCycleRequested += OnGamepadTabCycle;
+            gamepadNav.UpPressed += OnGamepadUp;
+            gamepadNav.DownPressed += OnGamepadDown;
+            gamepadNav.LeftPressed += OnGamepadLeft;
+            gamepadNav.RightPressed += OnGamepadRight;
+            gamepadNav.ActionPressed += OnGamepadAction;
+            gamepadNav.ScrollRequested += OnGamepadScroll;
+            gamepadNav.InputModeChanged += OnGamepadModeChanged;
+            gamepadNav.ConnectionChanged += OnGamepadConnectionChanged;
+            gamepadNav.DirectionNavigated += dir => { };
+
+            UpdateGamepadHudVisibility(gamepadNav.IsGamepadActive);
+            UpdateGamepadConnectionVisibility(gamepadNav.IsControllerConnected);
+            Loaded += (sender, args) => UpdateGamepadConnectionVisibility(gamepadNav.IsControllerConnected);
+
             if (learningService != null)
             {
-                learningService.StateChanged += learningStateChangedHandler;
+                learningService.StateChanged += () => Dispatcher.BeginInvoke(new Action(LoadLearnedItems));
+            }
+
+            if (sessionManager != null)
+            {
+                sessionManager.SessionStarted += (game, profile) => Dispatcher.BeginInvoke(new Action(UpdateDashboardStatus));
+                sessionManager.SessionStopped += reason => Dispatcher.BeginInvoke(new Action(UpdateDashboardStatus));
+                sessionManager.SessionError += err => Dispatcher.BeginInvoke(new Action(UpdateDashboardStatus));
+            }
+
+            if (gameListService != null)
+            {
+                gameListService.GamesUpdated += () => Dispatcher.BeginInvoke(new Action(LoadGames));
             }
 
             LoadGames();
             LoadLearnedItems();
+            UpdateDashboardStatus();
+            UpdateSettingsView();
 
-            if (string.Equals(initialTab, "learned", StringComparison.OrdinalIgnoreCase))
+            controllerDetection = new ControllerDetectionService();
+            controllerDetection.StatusChanged += status => Dispatcher.BeginInvoke(
+                new Action(() => UpdateControllerStatus(status)));
+            UpdateControllerStatus("disconnected");
+
+            if (string.Equals(initialTab, "games", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(initialTab, "certified", StringComparison.OrdinalIgnoreCase))
             {
-                NavTabLearned.IsChecked = true;
+                SetCurrentTab(1);
+            }
+            else if (string.Equals(initialTab, "learned", StringComparison.OrdinalIgnoreCase))
+            {
+                SetCurrentTab(2);
+            }
+            else if (string.Equals(initialTab, "settings", StringComparison.OrdinalIgnoreCase))
+            {
+                SetCurrentTab(3);
             }
             else
             {
-                NavTabCertified.IsChecked = true;
+                SetCurrentTab(0);
             }
 
             LocalizationManager.LanguageChanged += () =>
@@ -69,136 +135,1054 @@ namespace ApexSenseBridgeTray
                             item.RefreshLocalization();
                         }
                         UpdateTabTitles();
+                        UpdateDashboardStatus();
+                        UpdateSettingsView();
+                        UpdateDetailPane();
+                        UpdateControllerStatus(lastControllerStatus);
                     }
                     catch { }
                 }));
             };
         }
 
-        protected override void OnClosed(EventArgs e)
+        #region Gamepad Handling
+
+        private bool isGamepadMode;
+
+        // Dashboard navigation: row 0 = Hero Bridge, row 1 = Hub (col 0: Games, col 1: Learned), row 2 = Shelf (col 0..N)
+        private int dashboardNavRow = 0;
+        private int dashboardJumpCol = 0;
+        private int dashboardShelfIndex = 0;
+
+        // Settings navigation: 2 columns
+        private int settingsCol = 0; // 0 = Left (Detection), 1 = Right (Preferences)
+        private int settingsRow0 = 0; // row in Left column
+        private int settingsRow1 = 0; // row in Right column
+
+        // Learned navigation
+        private int learnedNavIndex = -1;
+
+        private void OnGamepadModeChanged(bool isGamepad)
         {
-            if (learningService != null)
+            isGamepadMode = isGamepad;
+            UpdateGamepadHudVisibility(isGamepad);
+            if (isGamepad) InitTabNavigation();
+            else ClearAllNavHighlights();
+        }
+
+        private void UpdateGamepadHudVisibility(bool isGamepad)
+        {
+            if (HintBumperLeft != null) HintBumperLeft.Opacity = isGamepad ? 1.0 : 0.45;
+            if (HintBumperRight != null) HintBumperRight.Opacity = isGamepad ? 1.0 : 0.45;
+            if (PnlGamepadHud != null) PnlGamepadHud.Opacity = isGamepad ? 1.0 : 0.6;
+        }
+
+        private void OnGamepadConnectionChanged(bool isConnected)
+        {
+            if (Dispatcher.CheckAccess()) UpdateGamepadConnectionVisibility(isConnected);
+            else Dispatcher.BeginInvoke(new Action(() => UpdateGamepadConnectionVisibility(isConnected)));
+        }
+
+        private void UpdateGamepadConnectionVisibility(bool isConnected)
+        {
+            Visibility visibility = isConnected ? Visibility.Visible : Visibility.Collapsed;
+            if (HintBumperLeft != null) HintBumperLeft.Visibility = visibility;
+            if (HintBumperRight != null) HintBumperRight.Visibility = visibility;
+            if (PnlGamepadHud != null) PnlGamepadHud.Visibility = visibility;
+            SetXboxGlyphVisibility(this, visibility);
+        }
+
+        private void SetXboxGlyphVisibility(DependencyObject parent, Visibility visibility)
+        {
+            if (parent == null) return;
+            Style styleA = TryFindResource("XboxBtnA") as Style;
+            Style styleB = TryFindResource("XboxBtnB") as Style;
+            Style styleX = TryFindResource("XboxBtnX") as Style;
+            Style styleY = TryFindResource("XboxBtnY") as Style;
+
+            int count = VisualTreeHelper.GetChildrenCount(parent);
+            for (int i = 0; i < count; i++)
             {
-                learningService.StateChanged -= learningStateChangedHandler;
+                DependencyObject child = VisualTreeHelper.GetChild(parent, i);
+                Border border = child as Border;
+                if (border != null &&
+                    (ReferenceEquals(border.Style, styleA) || ReferenceEquals(border.Style, styleB) ||
+                     ReferenceEquals(border.Style, styleX) || ReferenceEquals(border.Style, styleY)))
+                {
+                    border.Visibility = visibility;
+                }
+                SetXboxGlyphVisibility(child, visibility);
             }
-            base.OnClosed(e);
         }
 
-        private void OnWindowDrag(object sender, MouseButtonEventArgs e)
+        private void InitTabNavigation()
         {
-            if (e.ChangedButton == MouseButton.Left)
+            if (currentTabIndex == 0) SetDashboardNav(dashboardNavRow, dashboardNavRow == 1 ? dashboardJumpCol : dashboardShelfIndex);
+            else if (currentTabIndex == 1) { if (selectedGameIndex < 0 && filteredGames.Count > 0) SelectGame(0); }
+            else if (currentTabIndex == 2 && filteredLearned.Count > 0) SetLearnedNav(learnedNavIndex >= 0 ? learnedNavIndex : 0);
+            else if (currentTabIndex == 3) SetSettingsNav(settingsCol, settingsCol == 0 ? settingsRow0 : settingsRow1);
+        }
+
+        private void OnGamepadTabCycle(int delta)
+        {
+            ClearAllNavHighlights();
+            int next = currentTabIndex + delta;
+            if (next < 0) next = 3;
+            else if (next > 3) next = 0;
+            SetCurrentTab(next);
+            if (isGamepadMode) InitTabNavigation();
+        }
+
+        // --- Dashboard Navigation ---
+        private void SetDashboardNav(int row, int col = -1)
+        {
+            ClearDashboardNavHighlights();
+            dashboardNavRow = Math.Max(0, Math.Min(2, row));
+
+            if (dashboardNavRow == 0)
             {
-                DragMove();
+                if (TileManualBridge != null) ApplyHighlight(TileManualBridge);
+            }
+            else if (dashboardNavRow == 1)
+            {
+                if (col >= 0) dashboardJumpCol = Math.Max(0, Math.Min(1, col));
+                if (dashboardJumpCol == 0 && TileJumpGames != null) ApplyHighlight(TileJumpGames);
+                else if (dashboardJumpCol == 1 && TileJumpLearned != null) ApplyHighlight(TileJumpLearned);
+            }
+            else if (dashboardNavRow == 2)
+            {
+                if (dashboardFeaturedGames.Count == 0)
+                {
+                    SetDashboardNav(1, dashboardJumpCol);
+                    return;
+                }
+                if (col >= 0) dashboardShelfIndex = Math.Max(0, Math.Min(dashboardFeaturedGames.Count - 1, col));
+                HighlightShelfItem(dashboardShelfIndex);
             }
         }
 
-        private void OnCloseClick(object sender, RoutedEventArgs e)
+        private void HighlightShelfItem(int index)
         {
-            Close();
+            if (index < 0 || index >= dashboardFeaturedGames.Count) return;
+            for (int i = 0; i < dashboardFeaturedGames.Count; i++)
+            {
+                dashboardFeaturedGames[i].IsSelected = (i == index);
+            }
+
+            if (ScrollDashboardShelf != null && LstDashboardFeatured != null)
+            {
+                double cardWidth = 157.0; // 145 + 12 margin
+                double targetOffset = index * cardWidth;
+                double viewWidth = ScrollDashboardShelf.ActualWidth > 0 ? ScrollDashboardShelf.ActualWidth : 800.0;
+                double currentOffset = ScrollDashboardShelf.HorizontalOffset;
+
+                if (targetOffset < currentOffset)
+                    ScrollDashboardShelf.ScrollToHorizontalOffset(targetOffset);
+                else if (targetOffset + cardWidth > currentOffset + viewWidth)
+                    ScrollDashboardShelf.ScrollToHorizontalOffset(targetOffset - viewWidth + cardWidth + 24);
+            }
         }
 
-        #region Segmented Navigation Switcher
-
-        private void OnNavTabChanged(object sender, RoutedEventArgs e)
+        private void ClearDashboardNavHighlights()
         {
-            if (!IsLoaded) return;
-            UpdateActiveTab();
+            if (TileManualBridge != null) ClearElementHighlight(TileManualBridge);
+            if (TileJumpGames != null) ClearElementHighlight(TileJumpGames);
+            if (TileJumpLearned != null) ClearElementHighlight(TileJumpLearned);
+            for (int i = 0; i < dashboardFeaturedGames.Count; i++)
+            {
+                dashboardFeaturedGames[i].IsSelected = false;
+            }
         }
 
-        private void UpdateActiveTab()
+        // --- Settings Navigation (2 Columns) ---
+        private FrameworkElement[] GetSettingsCol0Items()
         {
-            bool isLearned = NavTabLearned.IsChecked == true;
-            PanelCertifiedGames.Visibility = isLearned ? Visibility.Collapsed : Visibility.Visible;
-            PanelLearnedExecutables.Visibility = isLearned ? Visibility.Visible : Visibility.Collapsed;
-
-            TxtHeaderSubtitle.Text = isLearned
-                ? LocalizationManager.Get("Loc_LearnedSubtitle")
-                : LocalizationManager.Get("Loc_GameListSubtitle");
+            var items = new List<FrameworkElement>();
+            if (TileSettingAutoDetect != null) items.Add(TileSettingAutoDetect);
+            if (TileSettingAdaptive != null && TileSettingAdaptive.IsEnabled) items.Add(TileSettingAdaptive);
+            if (TileSettingHaptic != null && TileSettingHaptic.IsEnabled) items.Add(TileSettingHaptic);
+            return items.ToArray();
         }
 
-        private void UpdateTabTitles()
+        private FrameworkElement[] GetSettingsCol1Items()
         {
-            UpdateActiveTab();
-            TxtNavCertifiedCount.Text = allGameViewModels.Count.ToString();
-            TxtNavLearnedCount.Text = allLearnedViewModels.Count.ToString();
+            var items = new List<FrameworkElement>();
+            if (TileSettingNotifications != null) items.Add(TileSettingNotifications);
+            if (TileSettingLanguage != null) items.Add(TileSettingLanguage);
+            if (BtnCheckUpdates != null) items.Add(BtnCheckUpdates);
+            return items.ToArray();
+        }
+
+        private void SetSettingsNav(int col, int row)
+        {
+            ClearSettingsNavHighlights();
+            settingsCol = Math.Max(0, Math.Min(1, col));
+            var items = settingsCol == 0 ? GetSettingsCol0Items() : GetSettingsCol1Items();
+            if (items.Length == 0) return;
+
+            int clampedRow = Math.Max(0, Math.Min(items.Length - 1, row));
+            if (settingsCol == 0) settingsRow0 = clampedRow;
+            else settingsRow1 = clampedRow;
+
+            ApplyHighlight(items[clampedRow]);
+            ScrollElementIntoView(ScrollSettings, items[clampedRow]);
+        }
+
+        private void ClearSettingsNavHighlights()
+        {
+            foreach (var item in GetSettingsCol0Items()) ClearElementHighlight(item);
+            foreach (var item in GetSettingsCol1Items()) ClearElementHighlight(item);
+        }
+
+        // --- Learned Navigation ---
+        private void SetLearnedNav(int index)
+        {
+            if (filteredLearned.Count == 0)
+            {
+                learnedNavIndex = -1;
+                return;
+            }
+            int clamped = Math.Max(0, Math.Min(filteredLearned.Count - 1, index));
+            learnedNavIndex = clamped;
+
+            if (ScrollLearned != null)
+            {
+                double itemHeight = 90.0;
+                double targetOffset = learnedNavIndex * itemHeight;
+                double viewHeight = ScrollLearned.ActualHeight > 0 ? ScrollLearned.ActualHeight : 400.0;
+                double currentOffset = ScrollLearned.VerticalOffset;
+
+                if (targetOffset < currentOffset)
+                    ScrollLearned.ScrollToVerticalOffset(targetOffset);
+                else if (targetOffset + itemHeight > currentOffset + viewHeight)
+                    ScrollLearned.ScrollToVerticalOffset(targetOffset - viewHeight + itemHeight + 16);
+            }
+        }
+
+        // --- Highlight Helpers ---
+        private void ApplyHighlight(FrameworkElement element)
+        {
+            if (element is Border border)
+            {
+                border.BorderBrush = (Brush)FindResource("GamepadFocusBorder");
+                border.BorderThickness = new Thickness(1.8);
+                border.Effect = new DropShadowEffect
+                {
+                    BlurRadius = 14,
+                    ShadowDepth = 0,
+                    Direction = 0,
+                    Color = Color.FromRgb(0x00, 0x70, 0xD1),
+                    Opacity = 0.75
+                };
+            }
+            else if (element is Button btn)
+            {
+                btn.BorderBrush = (Brush)FindResource("GamepadFocusBorder");
+                btn.BorderThickness = new Thickness(1.8);
+            }
+        }
+
+        private void ClearElementHighlight(FrameworkElement element)
+        {
+            if (element is Border border)
+            {
+                border.BorderBrush = Brushes.Transparent;
+                border.BorderThickness = new Thickness(0);
+                border.Effect = null;
+            }
+            else if (element is Button btn)
+            {
+                btn.BorderBrush = Brushes.Transparent;
+                btn.BorderThickness = new Thickness(0);
+            }
+        }
+
+        private void ClearAllNavHighlights()
+        {
+            ClearDashboardNavHighlights();
+            ClearSettingsNavHighlights();
+            learnedNavIndex = -1;
+        }
+
+        private void ScrollElementIntoView(ScrollViewer scroll, FrameworkElement element)
+        {
+            if (scroll == null || element == null) return;
+            try
+            {
+                var transform = element.TransformToAncestor(scroll);
+                var position = transform.Transform(new Point(0, 0));
+                double itemTop = position.Y + scroll.VerticalOffset;
+                double itemBottom = itemTop + element.ActualHeight;
+                double viewTop = scroll.VerticalOffset;
+                double viewBottom = viewTop + scroll.ActualHeight;
+
+                if (itemTop < viewTop)
+                    scroll.ScrollToVerticalOffset(itemTop - 8);
+                else if (itemBottom > viewBottom)
+                    scroll.ScrollToVerticalOffset(itemBottom - scroll.ActualHeight + 8);
+            }
+            catch { }
+        }
+
+        // --- Directional Input ---
+        private void OnGamepadUp()
+        {
+                if (currentTabIndex == 0)
+                {
+                    if (dashboardNavRow == 2) SetDashboardNav(1, dashboardJumpCol);
+                    else if (dashboardNavRow == 1) SetDashboardNav(0);
+                }
+                else if (currentTabIndex == 1)
+                {
+                    SelectGame(selectedGameIndex - 1);
+                }
+                else if (currentTabIndex == 2)
+                {
+                    if (learnedNavIndex > 0) SetLearnedNav(learnedNavIndex - 1);
+                }
+                else if (currentTabIndex == 3)
+                {
+                    int currentRow = settingsCol == 0 ? settingsRow0 : settingsRow1;
+                    if (currentRow > 0) SetSettingsNav(settingsCol, currentRow - 1);
+                }
+        }
+
+        private void OnGamepadDown()
+        {
+                if (currentTabIndex == 0)
+                {
+                    if (dashboardNavRow == 0) SetDashboardNav(1, dashboardJumpCol);
+                    else if (dashboardNavRow == 1) SetDashboardNav(2, dashboardShelfIndex);
+                }
+                else if (currentTabIndex == 1)
+                {
+                    SelectGame(selectedGameIndex + 1);
+                }
+                else if (currentTabIndex == 2)
+                {
+                    if (learnedNavIndex < filteredLearned.Count - 1) SetLearnedNav(learnedNavIndex + 1);
+                }
+                else if (currentTabIndex == 3)
+                {
+                    var items = settingsCol == 0 ? GetSettingsCol0Items() : GetSettingsCol1Items();
+                    int currentRow = settingsCol == 0 ? settingsRow0 : settingsRow1;
+                    if (currentRow < items.Length - 1) SetSettingsNav(settingsCol, currentRow + 1);
+                }
+        }
+
+        private void OnGamepadLeft()
+        {
+                if (currentTabIndex == 0)
+                {
+                    if (dashboardNavRow == 1)
+                    {
+                        SetDashboardNav(1, 0); // Jump to games
+                    }
+                    else if (dashboardNavRow == 2)
+                    {
+                        if (dashboardShelfIndex > 0) SetDashboardNav(2, dashboardShelfIndex - 1);
+                    }
+                }
+                else if (currentTabIndex == 1)
+                {
+                    var game = SelectedGame;
+                    if (game != null)
+                    {
+                        game.CycleApexProfile(-1);
+                        settings.SetApexProfileSlot(game.Normalized, game.SelectedApexProfileSlot);
+                        settings.Save();
+                        UpdateDetailPane();
+                    }
+                }
+                else if (currentTabIndex == 3)
+                {
+                    if (settingsCol == 1) SetSettingsNav(0, settingsRow0);
+                }
+        }
+
+        private void OnGamepadRight()
+        {
+                if (currentTabIndex == 0)
+                {
+                    if (dashboardNavRow == 1)
+                    {
+                        SetDashboardNav(1, 1); // Jump to learned
+                    }
+                    else if (dashboardNavRow == 2)
+                    {
+                        if (dashboardShelfIndex < dashboardFeaturedGames.Count - 1)
+                            SetDashboardNav(2, dashboardShelfIndex + 1);
+                    }
+                }
+                else if (currentTabIndex == 1)
+                {
+                    var game = SelectedGame;
+                    if (game != null)
+                    {
+                        game.CycleApexProfile(1);
+                        settings.SetApexProfileSlot(game.Normalized, game.SelectedApexProfileSlot);
+                        settings.Save();
+                        UpdateDetailPane();
+                    }
+                }
+                else if (currentTabIndex == 3)
+                {
+                    if (settingsCol == 0) SetSettingsNav(1, settingsRow1);
+                }
+        }
+
+        private void OnGamepadAction(GamepadButtonAction action)
+        {
+                switch (action)
+                {
+                    case GamepadButtonAction.Back:
+                        if (TxtSearch != null && (TxtSearch.IsFocused || !string.IsNullOrEmpty(TxtSearch.Text)))
+                        {
+                            TxtSearch.Text = string.Empty;
+                            Keyboard.ClearFocus();
+                        }
+                        else if (TxtSearchLearned != null && (TxtSearchLearned.IsFocused || !string.IsNullOrEmpty(TxtSearchLearned.Text)))
+                        {
+                            TxtSearchLearned.Text = string.Empty;
+                            Keyboard.ClearFocus();
+                        }
+                        else
+                        {
+                            Close();
+                        }
+                        break;
+
+                    case GamepadButtonAction.ActionY:
+                        if (currentTabIndex == 1 && TxtSearch != null)
+                        {
+                            TxtSearch.Focus();
+                            TxtSearch.SelectAll();
+                        }
+                        else if (currentTabIndex == 2 && TxtSearchLearned != null)
+                        {
+                            TxtSearchLearned.Focus();
+                            TxtSearchLearned.SelectAll();
+                        }
+                        break;
+
+                    case GamepadButtonAction.ActionX:
+                        if (currentTabIndex == 1)
+                        {
+                            ToggleCurrentGameExclusion();
+                        }
+                        else if (currentTabIndex == 2)
+                        {
+                            if (learnedNavIndex >= 0 && learnedNavIndex < filteredLearned.Count)
+                            {
+                                var item = filteredLearned[learnedNavIndex];
+                                item.IsSelected = !item.IsSelected;
+                            }
+                        }
+                        break;
+
+                    case GamepadButtonAction.Select:
+                        ActivateCurrentItem();
+                        break;
+                }
+        }
+
+        private void ActivateCurrentItem()
+        {
+            if (currentTabIndex == 0)
+            {
+                if (dashboardNavRow == 0)
+                {
+                    OnToggleManualBridgeClick(null, null);
+                }
+                else if (dashboardNavRow == 1)
+                {
+                    if (dashboardJumpCol == 0) SetCurrentTab(1);
+                    else SetCurrentTab(2);
+                }
+                else if (dashboardNavRow == 2)
+                {
+                    if (dashboardShelfIndex >= 0 && dashboardShelfIndex < dashboardFeaturedGames.Count)
+                    {
+                        var featured = dashboardFeaturedGames[dashboardShelfIndex];
+                        OpenGameInCertifiedList(featured);
+                    }
+                }
+            }
+            else if (currentTabIndex == 1)
+            {
+                var game = SelectedGame;
+                if (game != null)
+                {
+                    game.CycleApexProfile(1);
+                    settings.SetApexProfileSlot(game.Normalized, game.SelectedApexProfileSlot);
+                    settings.Save();
+                    UpdateDetailPane();
+                }
+            }
+            else if (currentTabIndex == 2)
+            {
+                if (learnedNavIndex >= 0 && learnedNavIndex < filteredLearned.Count)
+                {
+                    var item = filteredLearned[learnedNavIndex];
+                    item.IsSelected = !item.IsSelected;
+                }
+            }
+            else if (currentTabIndex == 3)
+            {
+                if (settingsCol == 0)
+                {
+                    if (settingsRow0 == 0) OnSettingAutoDetectToggled(null, null);
+                    else if (settingsRow0 == 1) OnSettingAdaptiveToggled(null, null);
+                    else if (settingsRow0 == 2) OnSettingHapticToggled(null, null);
+                }
+                else
+                {
+                    if (settingsRow1 == 0) OnSettingNotificationsToggled(null, null);
+                    else if (settingsRow1 == 1)
+                    {
+                        string nextLang = string.Equals(settings.Language, LocalizationManager.LangFrench, StringComparison.OrdinalIgnoreCase)
+                            ? LocalizationManager.LangEnglish
+                            : LocalizationManager.LangFrench;
+                        SwitchLanguage(nextLang);
+                        if (RadSettingFr != null) RadSettingFr.IsChecked = (nextLang == LocalizationManager.LangFrench);
+                        if (RadSettingEn != null) RadSettingEn.IsChecked = (nextLang == LocalizationManager.LangEnglish);
+                    }
+                    else if (settingsRow1 == 2) OnCheckUpdatesClick(null, null);
+                }
+            }
+        }
+
+        private void OnGamepadScroll(double deltaY)
+        {
+                ScrollViewer targetScroll = null;
+                if (currentTabIndex == 1) targetScroll = ScrollCertified;
+                else if (currentTabIndex == 2) targetScroll = ScrollLearned;
+                else if (currentTabIndex == 3) targetScroll = ScrollSettings;
+
+                if (targetScroll != null)
+                {
+                    targetScroll.ScrollToVerticalOffset(targetScroll.VerticalOffset + deltaY);
+                }
         }
 
         #endregion
 
-        #region Certified Games Logic
+        #region Navigation Tabs
+
+        private void SetCurrentTab(int index)
+        {
+            currentTabIndex = index;
+            if (NavTabDashboard != null) NavTabDashboard.IsChecked = (index == 0);
+            if (NavTabCertified != null) NavTabCertified.IsChecked = (index == 1);
+            if (NavTabLearned != null) NavTabLearned.IsChecked = (index == 2);
+            if (NavTabSettings != null) NavTabSettings.IsChecked = (index == 3);
+
+            if (PanelDashboard != null) PanelDashboard.Visibility = (index == 0) ? Visibility.Visible : Visibility.Collapsed;
+            if (PanelCertifiedGames != null) PanelCertifiedGames.Visibility = (index == 1) ? Visibility.Visible : Visibility.Collapsed;
+            if (PanelLearnedExecutables != null) PanelLearnedExecutables.Visibility = (index == 2) ? Visibility.Visible : Visibility.Collapsed;
+            if (ScrollSettings != null) ScrollSettings.Visibility = (index == 3) ? Visibility.Visible : Visibility.Collapsed;
+
+            if (index == 0)
+            {
+                UpdateDashboardStatus();
+            }
+            else if (index == 1)
+            {
+                if (selectedGameIndex < 0 && filteredGames.Count > 0)
+                {
+                    SelectGame(0);
+                }
+            }
+        }
+
+        private void OnNavTabChanged(object sender, RoutedEventArgs e)
+        {
+            if (NavTabDashboard != null && NavTabDashboard.IsChecked == true) SetCurrentTab(0);
+            else if (NavTabCertified != null && NavTabCertified.IsChecked == true) SetCurrentTab(1);
+            else if (NavTabLearned != null && NavTabLearned.IsChecked == true) SetCurrentTab(2);
+            else if (NavTabSettings != null && NavTabSettings.IsChecked == true) SetCurrentTab(3);
+        }
+
+        private void OnJumpToGamesClick(object sender, MouseButtonEventArgs e)
+        {
+            SetCurrentTab(1);
+        }
+
+        private void OnJumpToLearnedClick(object sender, MouseButtonEventArgs e)
+        {
+            SetCurrentTab(2);
+        }
+
+        #endregion
+
+        #region Dashboard View
+
+        private string lastControllerStatus = "disconnected";
+
+        private void UpdateControllerStatus(string status)
+        {
+            if (string.IsNullOrWhiteSpace(status)) status = "disconnected";
+            lastControllerStatus = status;
+
+            bool isApex4 = string.Equals(status, "apex4", StringComparison.OrdinalIgnoreCase);
+            bool isApex5 = string.Equals(status, "apex5", StringComparison.OrdinalIgnoreCase);
+            bool isConnected = isApex4 || isApex5;
+
+            string fullLabel;
+            string shortLabel;
+
+            if (isApex4)
+            {
+                fullLabel = LocalizationManager.Get("Loc_ControllerApex4");
+                shortLabel = "Apex 4";
+            }
+            else if (isApex5)
+            {
+                fullLabel = LocalizationManager.Get("Loc_ControllerApex5");
+                shortLabel = "Apex 5";
+            }
+            else if (string.Equals(status, "unsupported", StringComparison.OrdinalIgnoreCase))
+            {
+                fullLabel = LocalizationManager.Get("Loc_ControllerUnsupported");
+                shortLabel = "Inconnu";
+            }
+            else if (string.Equals(status, "unavailable", StringComparison.OrdinalIgnoreCase))
+            {
+                fullLabel = LocalizationManager.Get("Loc_ControllerUnavailable");
+                shortLabel = "Indisponible";
+            }
+            else
+            {
+                fullLabel = LocalizationManager.Get("Loc_ControllerDisconnected");
+                shortLabel = "APEX";
+            }
+
+            Brush activeStroke = (Brush)FindResource("PlayStationBlue");
+            Brush mutedStroke = (Brush)FindResource("TextMuted");
+            Brush activeText = (Brush)FindResource("TextPrimary");
+
+            // 1. Hero banner on Dashboard
+            if (TxtDashboardController != null)
+            {
+                TxtDashboardController.Text = fullLabel;
+                TxtDashboardController.Foreground = isConnected ? activeText : mutedStroke;
+            }
+            if (IconDashboardController != null)
+            {
+                IconDashboardController.Stroke = isConnected ? activeStroke : mutedStroke;
+            }
+            if (BadgeDashboardController != null)
+            {
+                BadgeDashboardController.Visibility = isConnected ? Visibility.Visible : Visibility.Collapsed;
+                if (isConnected)
+                {
+                    BadgeDashboardController.Background = new SolidColorBrush(Color.FromArgb(0x28, 0x00, 0x70, 0xD1));
+                    BadgeDashboardController.BorderBrush = new SolidColorBrush(Color.FromArgb(0x60, 0x00, 0x70, 0xD1));
+                }
+                else
+                {
+                    BadgeDashboardController.Background = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
+                    BadgeDashboardController.BorderBrush = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+                }
+            }
+
+            // 2. Persistent Header Indicator (visible on all tabs)
+            if (TxtHeaderController != null)
+            {
+                TxtHeaderController.Text = shortLabel;
+                TxtHeaderController.Foreground = isConnected ? activeText : mutedStroke;
+            }
+            if (IconHeaderController != null)
+            {
+                IconHeaderController.Stroke = isConnected ? activeStroke : mutedStroke;
+            }
+            if (BadgeHeaderController != null)
+            {
+                BadgeHeaderController.Visibility = isConnected ? Visibility.Visible : Visibility.Collapsed;
+                if (isConnected)
+                {
+                    BadgeHeaderController.Background = new SolidColorBrush(Color.FromArgb(0x28, 0x00, 0x70, 0xD1));
+                    BadgeHeaderController.BorderBrush = new SolidColorBrush(Color.FromArgb(0x60, 0x00, 0x70, 0xD1));
+                }
+                else
+                {
+                    BadgeHeaderController.Background = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
+                    BadgeHeaderController.BorderBrush = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+                }
+            }
+        }
+
+        private void UpdateDashboardStatus()
+        {
+            bool isActive = sessionManager != null && sessionManager.IsSessionActive;
+            if (BadgeDashboardStatus != null)
+            {
+                BadgeDashboardStatus.Background = (Brush)FindResource(isActive ? "BadgeActiveBg" : "BadgeStandbyBg");
+            }
+            if (TxtDashboardStatus != null)
+            {
+                TxtDashboardStatus.Text = LocalizationManager.Get(isActive ? "Loc_StatusBadgeActive" : "Loc_StatusBadgeStandby");
+                TxtDashboardStatus.Foreground = (Brush)FindResource(isActive ? "BadgeActiveFg" : "BadgeStandbyFg");
+            }
+
+            if (isActive && sessionManager != null)
+            {
+                if (TxtDashboardGameTitle != null) TxtDashboardGameTitle.Text = sessionManager.ActiveGameTitle ?? LocalizationManager.Get("Loc_NotificationGame");
+                if (TxtDashboardHint != null) TxtDashboardHint.Text = string.Format("Profil APEX : {0}", sessionManager.ActiveProfile ?? LocalizationManager.Get("Loc_ProfileStandard"));
+
+                var activeGame = allGameViewModels.FirstOrDefault(g => string.Equals(g.Title, sessionManager.ActiveGameTitle, StringComparison.OrdinalIgnoreCase));
+                if (activeGame != null && activeGame.HasCoverImage && ImgDashboardActiveCover != null)
+                {
+                    ImgDashboardActiveCover.Source = activeGame.CoverImage;
+                    PnlDashboardActiveCover.Visibility = Visibility.Visible;
+                    PnlDashboardStandbyCover.Visibility = Visibility.Collapsed;
+                }
+                else
+                {
+                    if (PnlDashboardActiveCover != null) PnlDashboardActiveCover.Visibility = Visibility.Collapsed;
+                    if (PnlDashboardStandbyCover != null) PnlDashboardStandbyCover.Visibility = Visibility.Visible;
+                }
+
+                if (BadgeDashAdaptive != null) BadgeDashAdaptive.Visibility = (activeGame != null && activeGame.AdaptiveTriggers) ? Visibility.Visible : Visibility.Collapsed;
+                if (BadgeDashHaptic != null) BadgeDashHaptic.Visibility = (activeGame != null && activeGame.HapticFeedback) ? Visibility.Visible : Visibility.Collapsed;
+                if (BadgeDashTouchpad != null) BadgeDashTouchpad.Visibility = (activeGame != null && activeGame.HasCustomRemapping) ? Visibility.Visible : Visibility.Collapsed;
+            }
+            else
+            {
+                if (TxtDashboardGameTitle != null) TxtDashboardGameTitle.Text = LocalizationManager.Get("Loc_NoActiveGame");
+                if (TxtDashboardHint != null) TxtDashboardHint.Text = LocalizationManager.Get("Loc_WaitingHint");
+                if (PnlDashboardActiveCover != null) PnlDashboardActiveCover.Visibility = Visibility.Collapsed;
+                if (PnlDashboardStandbyCover != null) PnlDashboardStandbyCover.Visibility = Visibility.Visible;
+                if (BadgeDashAdaptive != null) BadgeDashAdaptive.Visibility = Visibility.Collapsed;
+                if (BadgeDashHaptic != null) BadgeDashHaptic.Visibility = Visibility.Collapsed;
+                if (BadgeDashTouchpad != null) BadgeDashTouchpad.Visibility = Visibility.Collapsed;
+            }
+
+            UpdateManualBridgeTile();
+            UpdateTabTitles();
+        }
+
+        private void UpdateManualBridgeTile()
+        {
+            bool isManual = settings != null && settings.ForcedProfile == "standard";
+            if (BadgeManualBridgeToggle != null)
+            {
+                BadgeManualBridgeToggle.Background = isManual ? (Brush)FindResource("PlayStationBlue") : (Brush)FindResource("ControlBackground");
+                BadgeManualBridgeToggle.BorderBrush = isManual ? (Brush)FindResource("PlayStationBlue") : (Brush)FindResource("ControlBorder");
+            }
+            if (DotManualBridgeToggle != null)
+            {
+                DotManualBridgeToggle.HorizontalAlignment = isManual ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+                DotManualBridgeToggle.Margin = isManual ? new Thickness(0, 0, 4, 0) : new Thickness(4, 0, 0, 0);
+                DotManualBridgeToggle.Fill = isManual ? Brushes.White : (Brush)FindResource("TextMuted");
+            }
+        }
+
+        private void OnToggleManualBridgeClick(object sender, MouseButtonEventArgs e)
+        {
+            ToggleManualBridge();
+        }
+
+        private void ToggleManualBridge()
+        {
+            if (settings == null) return;
+            bool enable = settings.ForcedProfile != "standard";
+            settings.ForcedProfile = enable ? "standard" : "none";
+            settings.Save();
+
+            if (enable)
+            {
+                if (sessionManager != null && !sessionManager.IsSessionActive)
+                {
+                    string error;
+                    sessionManager.StartSession(LocalizationManager.Get("Loc_ManualBridgeGameTitle"), "standard", settings, out error);
+                }
+            }
+            else
+            {
+                if (sessionManager != null && sessionManager.IsSessionActive && !settings.AutoDetectGames)
+                {
+                    sessionManager.StopSession("Manual bridge disabled");
+                }
+                else if (monitorService != null)
+                {
+                    monitorService.ForceCheck();
+                }
+            }
+
+            UpdateManualBridgeTile();
+            UpdateDashboardStatus();
+            UpdateSettingsView();
+        }
+
+        private void OnDashboardFeaturedGameClicked(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is GameItemViewModel game)
+            {
+                OpenGameInCertifiedList(game);
+            }
+        }
+
+        private void OpenGameInCertifiedList(GameItemViewModel target)
+        {
+            if (target == null) return;
+            SetCurrentTab(1);
+            if (TxtSearch != null) TxtSearch.Text = "";
+            if (RadAll != null) RadAll.IsChecked = true;
+            ApplyFilter();
+
+            int targetIndex = filteredGames.IndexOf(target);
+            if (targetIndex >= 0)
+            {
+                SelectGame(targetIndex);
+            }
+        }
+
+        #endregion
+
+        #region Certified Games (Master-Detail)
+
+        public GameItemViewModel SelectedGame =>
+            (selectedGameIndex >= 0 && selectedGameIndex < filteredGames.Count) ? filteredGames[selectedGameIndex] : null;
 
         private void LoadGames()
         {
             allGameViewModels.Clear();
-            var rawGames = gameListService != null ? gameListService.GetAllGames() : new SupportedGame[0];
+            var list = gameListService?.GetAllGames() ?? new List<SupportedGame>();
 
-            foreach (var g in rawGames.OrderBy(x => x.Title))
+            foreach (var g in list)
             {
-                var isExcluded = settings.IsGameExcluded(g.Normalized) || settings.IsGameExcluded(g.Title);
-                var item = new GameItemViewModel
+                var vm = new GameItemViewModel
                 {
                     Game = g,
-                    IsExcluded = isExcluded,
+                    IsExcluded = settings.IsGameExcluded(g.Normalized),
                     SelectedApexProfileSlot = settings.GetApexProfileSlot(g.Normalized)
                 };
-                item.ApexProfileSlotChanged += OnApexProfileSlotChanged;
-                allGameViewModels.Add(item);
+                allGameViewModels.Add(vm);
             }
 
-            TxtNavCertifiedCount.Text = allGameViewModels.Count.ToString();
             ApplyFilter();
+            UpdateTabTitles();
+
+            dashboardFeaturedGames.Clear();
+            var featured = allGameViewModels
+                .Where(g => !g.IsExcluded)
+                .OrderByDescending(GetFeaturedScore)
+                .ThenBy(g => GetStableSelectionKey(g.Normalized))
+                .Take(14)
+                .ToList();
+            foreach (var f in featured)
+            {
+                dashboardFeaturedGames.Add(f);
+            }
+            dashboardShelfIndex = 0;
+            if (ScrollDashboardShelf != null) ScrollDashboardShelf.ScrollToHorizontalOffset(0);
+        }
+
+        private static int GetFeaturedScore(GameItemViewModel game)
+        {
+            int score = 0;
+            if (game.AdaptiveTriggers) score += 4;
+            if (game.HapticFeedback) score += 4;
+            if (game.HasCustomRemapping) score += 2;
+            if (!string.IsNullOrWhiteSpace(game.IconUrl)) score += 1;
+            return score;
+        }
+
+        private static uint GetStableSelectionKey(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in value ?? string.Empty)
+                {
+                    hash ^= char.ToLowerInvariant(character);
+                    hash *= 16777619;
+                }
+                return hash;
+            }
         }
 
         private void ApplyFilter()
         {
-            string search = (TxtSearch.Text ?? string.Empty).Trim().ToLowerInvariant();
-            bool filterAdaptive = RadAdaptive.IsChecked == true;
-            bool filterHaptic = RadHaptic.IsChecked == true;
-            bool filterExcluded = RadExcluded.IsChecked == true;
+            string query = TxtSearch?.Text?.Trim()?.ToLowerInvariant() ?? "";
+            bool filterAdaptive = RadAdaptive?.IsChecked == true;
+            bool filterHaptic = RadHaptic?.IsChecked == true;
+            bool filterExcluded = RadExcluded?.IsChecked == true;
 
-            var filtered = new List<GameItemViewModel>();
-
-            foreach (var item in allGameViewModels)
+            var matching = allGameViewModels.Where(g =>
             {
-                if (!string.IsNullOrEmpty(search))
+                if (filterExcluded && !g.IsExcluded) return false;
+                if (!filterExcluded && g.IsExcluded && RadAll?.IsChecked != true) return false;
+                if (filterAdaptive && !g.AdaptiveTriggers) return false;
+                if (filterHaptic && !g.HapticFeedback) return false;
+
+                if (!string.IsNullOrEmpty(query))
                 {
-                    if (!item.Title.ToLowerInvariant().Contains(search) &&
-                        !item.Profile.ToLowerInvariant().Contains(search))
-                    {
-                        continue;
-                    }
+                    return g.Title.ToLowerInvariant().Contains(query) ||
+                           g.Normalized.ToLowerInvariant().Contains(query);
                 }
+                return true;
+            }).OrderBy(g => g.Title).ToList();
 
-                if (filterAdaptive && !item.AdaptiveTriggers) continue;
-                if (filterHaptic && !item.HapticFeedback) continue;
-                if (filterExcluded && !item.IsExcluded) continue;
-
-                filtered.Add(item);
+            filteredGames.Clear();
+            foreach (var item in matching)
+            {
+                item.IsSelected = false;
+                filteredGames.Add(item);
             }
 
-            LstGames.ItemsSource = filtered;
-
-            int excludedCount = 0;
-            foreach (var x in allGameViewModels)
+            if (TxtStats != null)
             {
-                if (x.IsExcluded) excludedCount++;
+                TxtStats.Text = string.Format("{0} / {1}", filteredGames.Count, allGameViewModels.Count);
             }
 
-            int total = filtered.Count;
-            string displayedStr = LocalizationManager.Format(
-                total > 1 ? "Loc_GamesDisplayedPlural" : "Loc_GamesDisplayedSingular",
-                total);
-
-            if (excludedCount > 0)
+            if (filteredGames.Count > 0)
             {
-                string excludedStr = LocalizationManager.Format(
-                    excludedCount > 1 ? "Loc_GamesExcludedPlural" : "Loc_GamesExcludedSingular",
-                    excludedCount);
-                TxtStats.Text = string.Format("{0} • {1}", displayedStr, excludedStr);
+                SelectGame(0);
             }
             else
             {
-                TxtStats.Text = displayedStr;
+                selectedGameIndex = -1;
+                UpdateDetailPane();
+            }
+        }
+
+        private void SelectGame(int newIndex)
+        {
+            if (filteredGames.Count == 0)
+            {
+                selectedGameIndex = -1;
+                UpdateDetailPane();
+                return;
+            }
+
+            int clamped = Math.Max(0, Math.Min(filteredGames.Count - 1, newIndex));
+
+            if (selectedGameIndex >= 0 && selectedGameIndex < filteredGames.Count)
+            {
+                filteredGames[selectedGameIndex].IsSelected = false;
+            }
+
+            selectedGameIndex = clamped;
+            var selected = filteredGames[selectedGameIndex];
+            selected.IsSelected = true;
+
+            UpdateDetailPane();
+
+            if (ScrollCertified != null)
+            {
+                double targetOffset = selectedGameIndex * 62.0;
+                double currentOffset = ScrollCertified.VerticalOffset;
+                double viewHeight = ScrollCertified.ActualHeight > 0 ? ScrollCertified.ActualHeight : 400.0;
+
+                if (targetOffset < currentOffset)
+                {
+                    ScrollCertified.ScrollToVerticalOffset(targetOffset);
+                }
+                else if (targetOffset + 62.0 > currentOffset + viewHeight)
+                {
+                    ScrollCertified.ScrollToVerticalOffset(targetOffset - viewHeight + 80.0);
+                }
+            }
+        }
+
+        private void UpdateDetailPane()
+        {
+            var game = SelectedGame;
+            if (game == null)
+            {
+                if (TxtDetailEmpty != null) TxtDetailEmpty.Visibility = Visibility.Visible;
+                if (ScrollDetail != null) ScrollDetail.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            if (TxtDetailEmpty != null) TxtDetailEmpty.Visibility = Visibility.Collapsed;
+            if (ScrollDetail != null) ScrollDetail.Visibility = Visibility.Visible;
+
+            if (TxtDetailTitle != null) TxtDetailTitle.Text = game.Title;
+            if (TxtDetailInitials != null) TxtDetailInitials.Text = game.Initials;
+            if (PnlDetailMonogram != null) PnlDetailMonogram.Background = game.MonogramBackground;
+
+            if (ImgDetailCover != null)
+            {
+                ImgDetailCover.Source = game.CoverImage;
+                ImgDetailCover.Visibility = game.HasCoverImage ? Visibility.Visible : Visibility.Collapsed;
+                if (PnlDetailMonogram != null)
+                {
+                    PnlDetailMonogram.Visibility = game.HasCoverImage ? Visibility.Collapsed : Visibility.Visible;
+                }
+            }
+
+            if (BadgeDetailAdaptive != null) BadgeDetailAdaptive.Visibility = game.AdaptiveVisibility;
+            if (BadgeDetailHaptic != null) BadgeDetailHaptic.Visibility = game.HapticVisibility;
+            if (BadgeDetailTouchpad != null) BadgeDetailTouchpad.Visibility = game.RemappingVisibility;
+
+            if (TxtDetailApexProfile != null) TxtDetailApexProfile.Text = game.SelectedApexProfileDisplay;
+
+            if (TxtDetailExcludeAction != null)
+            {
+                TxtDetailExcludeAction.Text = game.IsExcluded
+                    ? LocalizationManager.Get("Loc_StateIncluded")
+                    : LocalizationManager.Get("Loc_BtnExcludeCurrent");
+            }
+        }
+
+        private void OnGameCardClicked(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is FrameworkElement el && el.DataContext is GameItemViewModel vm)
+            {
+                int idx = filteredGames.IndexOf(vm);
+                if (idx >= 0)
+                {
+                    SelectGame(idx);
+                }
+            }
+        }
+
+        private void OnCycleProfileLeftClick(object sender, RoutedEventArgs e)
+        {
+            var game = SelectedGame;
+            if (game != null)
+            {
+                game.CycleApexProfile(-1);
+                settings.SetApexProfileSlot(game.Normalized, game.SelectedApexProfileSlot);
+                settings.Save();
+                UpdateDetailPane();
+            }
+        }
+
+        private void OnCycleProfileRightClick(object sender, RoutedEventArgs e)
+        {
+            var game = SelectedGame;
+            if (game != null)
+            {
+                game.CycleApexProfile(1);
+                settings.SetApexProfileSlot(game.Normalized, game.SelectedApexProfileSlot);
+                settings.Save();
+                UpdateDetailPane();
+            }
+        }
+
+        private void OnDetailToggleExcludeClick(object sender, RoutedEventArgs e)
+        {
+            ToggleCurrentGameExclusion();
+        }
+
+        private void ToggleCurrentGameExclusion()
+        {
+            var game = SelectedGame;
+            if (game == null) return;
+
+            game.IsExcluded = !game.IsExcluded;
+            settings.SetGameExcluded(game.Normalized, game.IsExcluded);
+            settings.Save();
+
+            UpdateDetailPane();
+
+            if (RadExcluded?.IsChecked == true && !game.IsExcluded)
+            {
+                ApplyFilter();
             }
         }
 
@@ -217,106 +1201,53 @@ namespace ApexSenseBridgeTray
 
         private void OnFilterTabChanged(object sender, RoutedEventArgs e)
         {
-            if (!IsLoaded) return;
             ApplyFilter();
-        }
-
-        private void OnGameExcludedToggled(object sender, RoutedEventArgs e)
-        {
-            FrameworkElement elem = sender as FrameworkElement;
-            if (elem != null)
-            {
-                GameItemViewModel item = elem.DataContext as GameItemViewModel;
-                if (item != null)
-                {
-                    settings.SetGameExcluded(item.Normalized, item.IsExcluded);
-                    settings.Save();
-                    ApplyFilter();
-                }
-            }
-        }
-
-        private void OnApexProfileSlotChanged(GameItemViewModel item, int slot)
-        {
-            if (item == null || settings == null) return;
-            settings.SetApexProfileSlot(item.Normalized, slot);
-            settings.Save();
         }
 
         #endregion
 
-        #region Learned Executables Logic
+        #region Learned Executables
 
         private void LoadLearnedItems()
         {
             allLearnedViewModels.Clear();
+            var bindings = learningService?.GetBindings() ?? new List<LearnedExecutableBinding>();
 
-            if (learningService != null)
+            foreach (var b in bindings)
             {
-                var bindings = learningService.GetBindings();
-                foreach (var b in bindings.OrderByDescending(x => x.SuccessfulSessions).ThenBy(x => x.GameTitle))
-                {
-                    var vm = new LearnedItemViewModel(b);
-                    vm.PropertyChanged += OnLearnedItemPropertyChanged;
-                    allLearnedViewModels.Add(vm);
-                }
+                allLearnedViewModels.Add(new LearnedItemViewModel(b));
             }
 
-            TxtNavLearnedCount.Text = allLearnedViewModels.Count.ToString();
             ApplyLearnedFilter();
-            UpdateLearnedButtons();
-        }
-
-        private void OnLearnedItemPropertyChanged(object sender, PropertyChangedEventArgs e)
-        {
-            if (e.PropertyName == "IsSelected")
-            {
-                UpdateLearnedButtons();
-            }
+            UpdateTabTitles();
         }
 
         private void ApplyLearnedFilter()
         {
-            string search = (TxtSearchLearned.Text ?? string.Empty).Trim().ToLowerInvariant();
-            var filtered = new List<LearnedItemViewModel>();
+            string query = TxtSearchLearned?.Text?.Trim()?.ToLowerInvariant() ?? "";
 
-            foreach (var item in allLearnedViewModels)
+            var matching = allLearnedViewModels.Where(b =>
             {
-                if (!string.IsNullOrEmpty(search))
-                {
-                    bool matchTitle = !string.IsNullOrEmpty(item.GameTitle) && item.GameTitle.ToLowerInvariant().Contains(search);
-                    bool matchExe = !string.IsNullOrEmpty(item.Executable) && item.Executable.ToLowerInvariant().Contains(search);
-                    bool matchPath = !string.IsNullOrEmpty(item.Path) && item.Path.ToLowerInvariant().Contains(search);
-                    if (!matchTitle && !matchExe && !matchPath) continue;
-                }
+                if (string.IsNullOrEmpty(query)) return true;
+                return b.GameTitle.ToLowerInvariant().Contains(query) ||
+                       b.Executable.ToLowerInvariant().Contains(query) ||
+                       b.Path.ToLowerInvariant().Contains(query);
+            }).OrderBy(b => b.GameTitle).ToList();
 
-                filtered.Add(item);
+            filteredLearned.Clear();
+            foreach (var item in matching)
+            {
+                filteredLearned.Add(item);
             }
 
-            LstLearned.ItemsSource = filtered;
-            PnlLearnedEmpty.Visibility = allLearnedViewModels.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            bool hasItems = filteredLearned.Count > 0;
+            if (PnlLearnedEmpty != null) PnlLearnedEmpty.Visibility = hasItems ? Visibility.Collapsed : Visibility.Visible;
+            if (LstLearned != null) LstLearned.Visibility = hasItems ? Visibility.Visible : Visibility.Collapsed;
 
-            int count = filtered.Count;
-            var countText = LocalizationManager.Format(
-                count > 1 ? "Loc_LearnedCountPlural" : "Loc_LearnedCountSingular",
-                count);
-            int pending = learningService != null ? learningService.PendingCount : 0;
-            if (pending > 0)
+            if (TxtLearnedStats != null)
             {
-                var pendingText = LocalizationManager.Format(
-                    pending > 1 ? "Loc_LearningPendingPlural" : "Loc_LearningPendingSingular",
-                    pending);
-                TxtLearnedStats.Text = string.Format("{0} • {1}", countText, pendingText);
-                TxtLearnedEmptySubtitle.Text = LocalizationManager.Format(
-                    pending > 1 ? "Loc_LearnedEmptyPendingPlural" : "Loc_LearnedEmptyPendingSingular",
-                    pending);
+                TxtLearnedStats.Text = string.Format("{0} / {1}", filteredLearned.Count, allLearnedViewModels.Count);
             }
-            else
-            {
-                TxtLearnedStats.Text = countText;
-                TxtLearnedEmptySubtitle.Text = LocalizationManager.Get("Loc_LearnedEmptySubtitle");
-            }
-
             UpdateLearnedButtons();
         }
 
@@ -337,8 +1268,8 @@ namespace ApexSenseBridgeTray
         {
             int selectedCount = allLearnedViewModels.Count(x => x.IsSelected);
             bool hasSelection = selectedCount > 0;
-            BtnDeleteLearned.IsEnabled = hasSelection;
-            BtnExportLearned.IsEnabled = hasSelection || allLearnedViewModels.Count > 0;
+            if (BtnDeleteLearned != null) BtnDeleteLearned.IsEnabled = hasSelection;
+            if (BtnExportLearned != null) BtnExportLearned.IsEnabled = hasSelection || allLearnedViewModels.Count > 0;
         }
 
         private void OnSelectAllLearnedClick(object sender, RoutedEventArgs e)
@@ -422,6 +1353,184 @@ namespace ApexSenseBridgeTray
                 LocalizationManager.Get("Loc_LearnedWindowTitle"),
                 MessageBoxButton.OK,
                 success ? MessageBoxImage.Information : MessageBoxImage.Error);
+        }
+
+        #endregion
+
+        #region Settings View
+
+        private void UpdateSettingsView()
+        {
+            if (settings == null) return;
+
+            UpdateSettingToggle(BadgeSettingAutoDetect, DotSettingAutoDetect, settings.AutoDetectGames);
+            UpdateSettingToggle(BadgeSettingAdaptive, DotSettingAdaptive, settings.TriggerOnAdaptiveTriggers);
+            UpdateSettingToggle(BadgeSettingHaptic, DotSettingHaptic, settings.TriggerOnHapticFeedback);
+            UpdateSettingToggle(BadgeSettingNotifications, DotSettingNotifications, settings.EnableNotifications);
+
+            if (PnlSettingCriteria != null)
+            {
+                PnlSettingCriteria.IsEnabled = settings.AutoDetectGames;
+                PnlSettingCriteria.Opacity = settings.AutoDetectGames ? 1.0 : 0.45;
+            }
+
+            bool isFr = LocalizationManager.CurrentLanguage == LocalizationManager.LangFrench;
+            if (RadSettingFr != null) RadSettingFr.IsChecked = isFr;
+            if (RadSettingEn != null) RadSettingEn.IsChecked = !isFr;
+
+            if (updateChecker != null && TxtVersionInfo != null)
+            {
+                TxtVersionInfo.Text = string.Format("ApexSenseBridge v{0}", updateChecker.GetCurrentVersion());
+            }
+        }
+
+        private void UpdateSettingToggle(Border badge, Ellipse dot, bool isChecked)
+        {
+            if (badge == null || dot == null) return;
+            badge.Background = isChecked ? (Brush)FindResource("PlayStationBlue") : (Brush)FindResource("ControlBackground");
+            badge.BorderBrush = isChecked ? (Brush)FindResource("PlayStationBlue") : (Brush)FindResource("ControlBorder");
+            dot.HorizontalAlignment = isChecked ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+            dot.Margin = isChecked ? new Thickness(0, 0, 3, 0) : new Thickness(3, 0, 0, 0);
+            dot.Fill = isChecked ? Brushes.White : (Brush)FindResource("TextMuted");
+        }
+
+        private void OnSettingAutoDetectToggled(object sender, MouseButtonEventArgs e)
+        {
+            if (settings == null) return;
+            settings.AutoDetectGames = !settings.AutoDetectGames;
+            settings.Save();
+            UpdateSettingsView();
+            if (settings.AutoDetectGames)
+            {
+                monitorService?.ForceCheck();
+            }
+            else if (sessionManager != null && sessionManager.IsSessionActive && settings.ForcedProfile == "none")
+            {
+                sessionManager.StopSession("Auto-detect disabled");
+            }
+            UpdateDashboardStatus();
+        }
+
+        private void OnSettingAdaptiveToggled(object sender, MouseButtonEventArgs e)
+        {
+            if (settings == null || !settings.AutoDetectGames) return;
+            settings.TriggerOnAdaptiveTriggers = !settings.TriggerOnAdaptiveTriggers;
+            settings.Save();
+            UpdateSettingsView();
+            monitorService?.ForceCheck();
+        }
+
+        private void OnSettingHapticToggled(object sender, MouseButtonEventArgs e)
+        {
+            if (settings == null || !settings.AutoDetectGames) return;
+            settings.TriggerOnHapticFeedback = !settings.TriggerOnHapticFeedback;
+            settings.Save();
+            UpdateSettingsView();
+            monitorService?.ForceCheck();
+        }
+
+        private void OnSettingNotificationsToggled(object sender, MouseButtonEventArgs e)
+        {
+            if (settings == null) return;
+            settings.EnableNotifications = !settings.EnableNotifications;
+            settings.Save();
+            UpdateSettingsView();
+        }
+
+        private void OnSettingLanguageFrChecked(object sender, RoutedEventArgs e)
+        {
+            SwitchLanguage(LocalizationManager.LangFrench);
+        }
+
+        private void OnSettingLanguageEnChecked(object sender, RoutedEventArgs e)
+        {
+            SwitchLanguage(LocalizationManager.LangEnglish);
+        }
+
+        private void SwitchLanguage(string lang)
+        {
+            if (settings != null)
+            {
+                settings.Language = lang;
+                settings.Save();
+            }
+            LocalizationManager.SetLanguage(lang);
+            UpdateControllerStatus(lastControllerStatus);
+        }
+
+        private async void OnCheckUpdatesClick(object sender, RoutedEventArgs e)
+        {
+            if (updateChecker == null) return;
+            if (BtnCheckUpdates != null) BtnCheckUpdates.IsEnabled = false;
+            if (TxtUpdateStatus != null) TxtUpdateStatus.Text = LocalizationManager.Get("Loc_SoftwareUpdate") + " — ...";
+
+            try
+            {
+                var info = await updateChecker.CheckForUpdatesAsync(false);
+                if (info != null && info.HasUpdate)
+                {
+                    if (TxtUpdateStatus != null)
+                    {
+                        TxtUpdateStatus.Text = string.Format("v{0} disponible !", info.LatestVersion);
+                        TxtUpdateStatus.Foreground = (Brush)FindResource("BadgeActiveFg");
+                    }
+                }
+                else
+                {
+                    if (TxtUpdateStatus != null)
+                    {
+                        TxtUpdateStatus.Text = LocalizationManager.Get("Loc_UpdateUpToDate");
+                    }
+                }
+            }
+            catch
+            {
+                if (TxtUpdateStatus != null)
+                {
+                    TxtUpdateStatus.Text = LocalizationManager.Get("Loc_UpdateCheckUnavailable");
+                }
+            }
+            finally
+            {
+                if (BtnCheckUpdates != null) BtnCheckUpdates.IsEnabled = true;
+            }
+        }
+
+        #endregion
+
+        #region Window Controls
+
+        private void UpdateTabTitles()
+        {
+            if (TxtNavCertifiedCount != null) TxtNavCertifiedCount.Text = allGameViewModels.Count.ToString();
+            if (TxtNavLearnedCount != null) TxtNavLearnedCount.Text = allLearnedViewModels.Count.ToString();
+            if (TxtDashCountGames != null) TxtDashCountGames.Text = allGameViewModels.Count.ToString();
+            if (TxtDashCountLearned != null) TxtDashCountLearned.Text = allLearnedViewModels.Count.ToString();
+        }
+
+        private void OnWindowDrag(object sender, MouseButtonEventArgs e)
+        {
+            if (e.LeftButton == MouseButtonState.Pressed)
+            {
+                DragMove();
+            }
+        }
+
+        private void OnMinimizeClick(object sender, RoutedEventArgs e)
+        {
+            WindowState = WindowState.Minimized;
+        }
+
+        private void OnCloseClick(object sender, RoutedEventArgs e)
+        {
+            Close();
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            controllerDetection?.Dispose();
+            gamepadNav?.Dispose();
+            base.OnClosed(e);
         }
 
         #endregion
@@ -529,12 +1638,12 @@ namespace ApexSenseBridgeTray
                 int hash = Math.Abs((Title ?? "game").GetHashCode());
                 var palette = new[]
                 {
-                    new SolidColorBrush(Color.FromRgb(26, 47, 85)),   // PlayStation Navy
-                    new SolidColorBrush(Color.FromRgb(20, 60, 50)),   // Emerald slate
-                    new SolidColorBrush(Color.FromRgb(60, 25, 65)),   // Royal amethyst
-                    new SolidColorBrush(Color.FromRgb(70, 30, 30)),   // Deep crimson
-                    new SolidColorBrush(Color.FromRgb(24, 52, 70)),   // Steel teal
-                    new SolidColorBrush(Color.FromRgb(40, 40, 55))    // Dark slate
+                    new SolidColorBrush(Color.FromRgb(26, 47, 85)),
+                    new SolidColorBrush(Color.FromRgb(20, 60, 50)),
+                    new SolidColorBrush(Color.FromRgb(60, 25, 65)),
+                    new SolidColorBrush(Color.FromRgb(70, 30, 30)),
+                    new SolidColorBrush(Color.FromRgb(24, 52, 70)),
+                    new SolidColorBrush(Color.FromRgb(40, 40, 55))
                 };
                 var brush = palette[hash % palette.Length];
                 brush.Freeze();
@@ -565,18 +1674,12 @@ namespace ApexSenseBridgeTray
         public Visibility HapticVisibility => HapticFeedback ? Visibility.Visible : Visibility.Collapsed;
         public Visibility RemappingVisibility => HasCustomRemapping ? Visibility.Visible : Visibility.Collapsed;
 
-        public IEnumerable<ApexProfileChoice> ApexProfileChoices
+        public string SelectedApexProfileDisplay
         {
             get
             {
-                return new[]
-                {
-                    new ApexProfileChoice(0, LocalizationManager.Get("Loc_ApexProfileKeep")),
-                    new ApexProfileChoice(1, LocalizationManager.Format("Loc_ApexProfileNumber", 1)),
-                    new ApexProfileChoice(2, LocalizationManager.Format("Loc_ApexProfileNumber", 2)),
-                    new ApexProfileChoice(3, LocalizationManager.Format("Loc_ApexProfileNumber", 3)),
-                    new ApexProfileChoice(4, LocalizationManager.Format("Loc_ApexProfileNumber", 4))
-                };
+                if (SelectedApexProfileSlot == 0) return LocalizationManager.Get("Loc_ApexProfileKeep");
+                return LocalizationManager.Format("Loc_ApexProfileNumber", SelectedApexProfileSlot);
             }
         }
 
@@ -591,16 +1694,37 @@ namespace ApexSenseBridgeTray
                 {
                     selectedApexProfileSlot = normalized;
                     OnPropertyChanged("SelectedApexProfileSlot");
-                    var handler = ApexProfileSlotChanged;
-                    if (handler != null) handler(this, normalized);
+                    OnPropertyChanged("SelectedApexProfileDisplay");
                 }
             }
         }
 
+        public void CycleApexProfile(int delta)
+        {
+            int next = SelectedApexProfileSlot + delta;
+            if (next < 0) next = 4;
+            else if (next > 4) next = 0;
+            SelectedApexProfileSlot = next;
+        }
+
         public void RefreshLocalization()
         {
-            OnPropertyChanged("ApexProfileChoices");
             OnPropertyChanged("SelectedApexProfileSlot");
+            OnPropertyChanged("SelectedApexProfileDisplay");
+        }
+
+        private bool isSelected;
+        public bool IsSelected
+        {
+            get => isSelected;
+            set
+            {
+                if (isSelected != value)
+                {
+                    isSelected = value;
+                    OnPropertyChanged("IsSelected");
+                }
+            }
         }
 
         private bool isExcluded;
@@ -614,33 +1738,15 @@ namespace ApexSenseBridgeTray
                     isExcluded = value;
                     OnPropertyChanged("IsExcluded");
                     OnPropertyChanged("CardOpacity");
+                    OnPropertyChanged("ExcludedBadgeVisibility");
                 }
             }
         }
 
-        public double CardOpacity => IsExcluded ? 0.6 : 1.0;
+        public Visibility ExcludedBadgeVisibility => IsExcluded ? Visibility.Visible : Visibility.Collapsed;
+        public double CardOpacity => IsExcluded ? 0.55 : 1.0;
 
         public event PropertyChangedEventHandler PropertyChanged;
-        public event Action<GameItemViewModel, int> ApexProfileSlotChanged;
-        protected void OnPropertyChanged(string name)
-        {
-            var handler = PropertyChanged;
-            if (handler != null)
-            {
-                handler(this, new PropertyChangedEventArgs(name));
-            }
-        }
-    }
-
-    public sealed class ApexProfileChoice
-    {
-        public int Slot { get; private set; }
-        public string Name { get; private set; }
-
-        public ApexProfileChoice(int slot, string name)
-        {
-            Slot = slot;
-            Name = name;
-        }
+        protected void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }

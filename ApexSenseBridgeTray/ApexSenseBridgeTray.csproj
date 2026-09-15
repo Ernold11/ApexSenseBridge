@@ -92,6 +92,7 @@
     <Compile Include="Models\SupportedGame.cs" />
     <Compile Include="Models\TraySettings.cs" />
     <Compile Include="Services\CloudGameListService.cs" />
+    <Compile Include="Services\ControllerDetectionService.cs" />
     <Compile Include="Services\ExecutableLearningService.cs" />
     <Compile Include="Services\GameProcessSessionTracker.cs" />
     <Compile Include="Services\GameActivationPolicy.cs" />
@@ -107,6 +108,7 @@
     <Compile Include="Common\BridgeSession.cs" />
     <Compile Include="Common\InstallLocator.cs" />
     <Compile Include="Common\ThemeManager.cs" />
+    <Compile Include="Common\GamepadNavigationService.cs" />
     <Compile Include="Common\LocalizationManager.cs" />
     <Compile Include="Common\CoverCacheService.cs" />
     <Compile Include="Properties\AssemblyInfo.cs">

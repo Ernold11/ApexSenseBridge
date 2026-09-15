@@ -86,9 +86,6 @@ namespace ApexSenseBridgeTray
                     gameListService, sessionManager, learningService,
                     monitorService, updateChecker, settings);
 
-                // Loading is deliberately started only after the existing process
-                // watchers are active. Until it completes, detection follows the
-                // unchanged exact/metadata/fuzzy path.
                 learningService.InitializeAsync();
 
                 InitializeNotifyIcon();
@@ -225,6 +222,12 @@ namespace ApexSenseBridgeTray
         private void InitializeNotifyIcon()
         {
             contextMenu = new ContextMenuStrip();
+            contextMenu.Renderer = new DarkTrayMenuRenderer();
+            contextMenu.Font = new Font("Segoe UI", 9.25f, System.Drawing.FontStyle.Regular);
+            contextMenu.ShowImageMargin = false;
+            contextMenu.ShowCheckMargin = false;
+            contextMenu.BackColor = Color.FromArgb(14, 16, 22);
+            contextMenu.ForeColor = Color.FromArgb(235, 238, 245);
             BuildContextMenu();
 
             Icon appIcon = SystemIcons.Application;
@@ -259,6 +262,14 @@ namespace ApexSenseBridgeTray
             notifyIcon.Text = LocalizationManager.Get("Loc_TrayTooltipStandby");
             notifyIcon.Visible = true;
 
+            notifyIcon.Click += (s, e) =>
+            {
+                var me = e as MouseEventArgs;
+                if (me == null || me.Button == MouseButtons.Left)
+                {
+                    ShowMainWindow();
+                }
+            };
             notifyIcon.DoubleClick += (s, e) => ShowMainWindow();
         }
 
@@ -316,8 +327,16 @@ namespace ApexSenseBridgeTray
                 }
             }));
 
-            // Language submenu
             var langMenu = new ToolStripMenuItem(LocalizationManager.Get("Loc_TrayLanguage"));
+            langMenu.DropDown.Renderer = new DarkTrayMenuRenderer();
+            var dropDownMenu = langMenu.DropDown as ToolStripDropDownMenu;
+            if (dropDownMenu != null)
+            {
+                dropDownMenu.ShowImageMargin = false;
+                dropDownMenu.ShowCheckMargin = false;
+            }
+            langMenu.DropDown.BackColor = Color.FromArgb(14, 16, 22);
+            langMenu.DropDown.ForeColor = Color.FromArgb(235, 238, 245);
             var langEnglish = new ToolStripMenuItem("English", null, (s, e) => SwitchLanguage(LocalizationManager.LangEnglish));
             var langFrench = new ToolStripMenuItem("Français", null, (s, e) => SwitchLanguage(LocalizationManager.LangFrench));
             langEnglish.Checked = LocalizationManager.CurrentLanguage == LocalizationManager.LangEnglish;
@@ -348,25 +367,43 @@ namespace ApexSenseBridgeTray
                 if (sessionManager != null && sessionManager.IsSessionActive)
                 {
                     var text = LocalizationManager.Format("Loc_TrayStatusActive", sessionManager.ActiveGameTitle);
-                    if (statusMenuItem != null) statusMenuItem.Text = text;
+                    if (statusMenuItem != null)
+                    {
+                        statusMenuItem.Text = text;
+                        statusMenuItem.ForeColor = Color.FromArgb(52, 211, 153);
+                    }
                     if (notifyIcon != null) notifyIcon.Text = text.Length > 63 ? text.Substring(0, 60) + "..." : text;
                 }
                 else
                 {
-                    if (statusMenuItem != null) statusMenuItem.Text = LocalizationManager.Get("Loc_TrayStatusStandby");
+                    if (statusMenuItem != null)
+                    {
+                        statusMenuItem.Text = LocalizationManager.Get("Loc_TrayStatusStandby");
+                        statusMenuItem.ForeColor = Color.FromArgb(56, 189, 248);
+                    }
                     if (notifyIcon != null) notifyIcon.Text = LocalizationManager.Get("Loc_TrayTooltipStandby");
                 }
             }
             catch { }
         }
 
+        private GameListWindow dashboardWindow;
+
         private void ShowMainWindow()
         {
             try
             {
-                mainWindow.Show();
-                mainWindow.WindowState = WindowState.Normal;
-                mainWindow.Activate();
+                if (dashboardWindow == null || !dashboardWindow.IsLoaded)
+                {
+                    dashboardWindow = new GameListWindow(
+                        gameListService, settings, learningService,
+                        sessionManager, monitorService, updateChecker,
+                        initialTab: "dashboard");
+                    dashboardWindow.Closed += (s, e) => dashboardWindow = null;
+                }
+                dashboardWindow.Show();
+                dashboardWindow.WindowState = WindowState.Normal;
+                dashboardWindow.Activate();
             }
             catch { }
         }
@@ -399,6 +436,67 @@ namespace ApexSenseBridgeTray
             if (notifyIcon != null) notifyIcon.Dispose();
             if (singleInstanceMutex != null) singleInstanceMutex.Dispose();
             base.OnExit(e);
+        }
+    }
+
+    internal sealed class DarkTrayColorTable : ProfessionalColorTable
+    {
+        public override Color ToolStripDropDownBackground => Color.FromArgb(14, 16, 22);
+        public override Color MenuBorder => Color.FromArgb(36, 40, 52);
+        public override Color MenuItemBorder => Color.Transparent;
+        public override Color MenuItemSelected => Color.FromArgb(0, 112, 209);
+        public override Color MenuItemSelectedGradientBegin => Color.FromArgb(0, 112, 209);
+        public override Color MenuItemSelectedGradientEnd => Color.FromArgb(0, 112, 209);
+        public override Color MenuItemPressedGradientBegin => Color.FromArgb(0, 91, 181);
+        public override Color MenuItemPressedGradientEnd => Color.FromArgb(0, 91, 181);
+        public override Color ImageMarginGradientBegin => Color.FromArgb(14, 16, 22);
+        public override Color ImageMarginGradientMiddle => Color.FromArgb(14, 16, 22);
+        public override Color ImageMarginGradientEnd => Color.FromArgb(14, 16, 22);
+        public override Color SeparatorDark => Color.FromArgb(36, 40, 52);
+        public override Color SeparatorLight => Color.Transparent;
+        public override Color CheckBackground => Color.FromArgb(0, 112, 209);
+        public override Color CheckSelectedBackground => Color.FromArgb(0, 120, 220);
+        public override Color CheckPressedBackground => Color.FromArgb(0, 91, 181);
+    }
+
+    internal sealed class DarkTrayMenuRenderer : ToolStripProfessionalRenderer
+    {
+        public DarkTrayMenuRenderer() : base(new DarkTrayColorTable())
+        {
+            RoundedEdges = true;
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            if (!e.Item.Enabled)
+            {
+                e.TextColor = Color.FromArgb(100, 108, 126);
+            }
+            else if (e.Item.Selected)
+            {
+                e.TextColor = Color.White;
+            }
+            else
+            {
+                e.TextColor = Color.FromArgb(235, 238, 245);
+            }
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (e.Item.Selected && e.Item.Enabled)
+            {
+                var rect = new Rectangle(3, 1, e.Item.Width - 6, e.Item.Height - 2);
+                using (var brush = new SolidBrush(Color.FromArgb(0, 112, 209)))
+                {
+                    e.Graphics.FillRectangle(brush, rect);
+                }
+            }
+            else
+            {
+                base.OnRenderMenuItemBackground(e);
+            }
         }
     }
 }

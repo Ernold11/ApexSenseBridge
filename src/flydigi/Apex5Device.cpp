@@ -83,7 +83,7 @@ struct Apex4IdentityObservation {
     std::vector<std::string> samples;
 };
 
-std::optional<std::vector<std::uint8_t>> exchangeProfileCommand(
+std::optional<std::vector<std::uint8_t>> exchangeCommand(
     platform::HidTransport& transport,
     const Report& request,
     std::uint8_t command,
@@ -100,7 +100,7 @@ std::optional<std::vector<std::uint8_t>> exchangeProfileCommand(
             input, std::chrono::milliseconds(0), bytesRead, readError);
         if (status == platform::HidReadStatus::Timeout) break;
         if (status == platform::HidReadStatus::Error) {
-            error = "Could not drain stale HID input before the profile command: " +
+            error = "Could not drain stale HID input before Flydigi command: " +
                     readError;
             return std::nullopt;
         }
@@ -108,7 +108,7 @@ std::optional<std::vector<std::uint8_t>> exchangeProfileCommand(
 
     std::string writeError;
     if (!transport.writeOutputReport(request, writeError)) {
-        error = "Could not send Flydigi profile command 0x";
+        error = "Could not send Flydigi command 0x";
         std::ostringstream commandText;
         commandText << std::hex << std::uppercase
                     << static_cast<unsigned int>(command);
@@ -132,7 +132,7 @@ std::optional<std::vector<std::uint8_t>> exchangeProfileCommand(
             input, remaining, bytesRead, readError);
         if (status == platform::HidReadStatus::Timeout) break;
         if (status == platform::HidReadStatus::Error) {
-            error = "Could not read the Flydigi profile command reply: " + readError;
+            error = "Could not read the Flydigi command reply: " + readError;
             return std::nullopt;
         }
         const auto bytes = std::span<const std::uint8_t>(input.data(), bytesRead);
@@ -144,7 +144,7 @@ std::optional<std::vector<std::uint8_t>> exchangeProfileCommand(
     std::ostringstream commandText;
     commandText << std::hex << std::uppercase
                 << static_cast<unsigned int>(command);
-    error = "No Flydigi profile command 0x" + commandText.str() +
+    error = "No Flydigi command 0x" + commandText.str() +
             " reply arrived within 750 ms; wake the controller and close "
             "Flydigi Space Station before retrying";
     return std::nullopt;
@@ -415,7 +415,7 @@ bool Apex5Device::stopRumble(std::string& error) {
 
 bool Apex5Device::readProfileStatus(ProfileStatus& status, std::string& error) {
     if (!mayControlProfiles(error)) return false;
-    const auto reply = exchangeProfileCommand(
+    const auto reply = exchangeCommand(
         *transport_, buildProfileStatusRequest(), kCmdProfileStatus, error);
     if (!reply) return false;
     const auto parsed = parseProfileStatus(*reply);
@@ -434,8 +434,43 @@ bool Apex5Device::applyProfile(std::uint8_t slot, std::string& error) {
         error = "Profile slot must be in the range 1..4";
         return false;
     }
-    return exchangeProfileCommand(
+    return exchangeCommand(
         *transport_, *request, kCmdApplyProfile, error).has_value();
+}
+
+bool Apex5Device::readInputTransportStatus(InputTransportStatus& status,
+                                           std::string& error) {
+    if (!mayControlProfiles(error)) return false;
+    const auto reply = exchangeCommand(
+        *transport_, buildInputTransportStatusRequest(),
+        kCmdReadInputTransport, error);
+    if (!reply) return false;
+    const auto parsed = parseInputTransportStatus(*reply);
+    if (!parsed) {
+        error = "The Apex 5 returned a malformed input-transport status";
+        return false;
+    }
+    status = *parsed;
+    return true;
+}
+
+bool Apex5Device::setInputTransport(bool controllerData, bool rawData,
+                                    std::string& error) {
+    if (!mayControlProfiles(error)) return false;
+    if (!exchangeCommand(
+            *transport_, buildSetInputTransport(controllerData, rawData),
+            kCmdSetInputTransport, error)) {
+        return false;
+    }
+
+    InputTransportStatus effective{};
+    if (!readInputTransportStatus(effective, error)) return false;
+    if (effective.controllerData != controllerData ||
+        effective.rawData != rawData) {
+        error = "The Apex 5 did not retain the requested physical-input routing";
+        return false;
+    }
+    return true;
 }
 
 } // namespace asb::flydigi

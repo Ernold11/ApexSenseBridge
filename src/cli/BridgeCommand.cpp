@@ -6,6 +6,7 @@
 #include "diagnostics/HidDiagnostics.h"
 #include "dualsense/DualSenseFirmware.h"
 #include "dualsense/VirtualDualSense.h"
+#include "dualsense/VirtualDualSenseStartup.h"
 #include "dualsense/AdaptiveTriggerBridge.h"
 #include "dualsense/AdaptiveTriggerTranslation.h"
 #include "dualsense/RumbleBridge.h"
@@ -493,43 +494,65 @@ int commandBridgeTriggers(int argc, char** argv) {
     backendOptions.viiperExecutable = std::move(options.viiperExecutable);
     backendOptions.backend = options.virtualBackend;
     auto virtualDualSense = asb::dualsense::createVirtualDualSense(std::move(backendOptions));
-    if (!virtualDualSense->open(
-            error,
-            [&bridge, rumble = rumbleBridge.get()](const auto& feedback) {
-                bridge.handle(feedback);
-                if (rumble) rumble->handle(feedback);
-            })) {
-        std::cerr << "Virtual DualSense creation failed: " << error << '\n';
-        return failSession(6, "Virtual DualSense creation failed: " + error);
-    }
+    const asb::dualsense::VirtualDualSense::FeedbackHandler feedbackHandler =
+        [&bridge, rumble = rumbleBridge.get()](const auto& feedback) {
+            bridge.handle(feedback);
+            if (rumble) rumble->handle(feedback);
+        };
+    std::future<bool> audioProtectionFuture;
+    const auto probeFirmware = [&preexistingDualSensePaths, &audioProtection,
+                                &audioProtectionError, &audioProtectionFuture]
+        (std::string& probeError) {
+        if (audioProtectionFuture.valid()) {
+            const bool previousProtectionOk = audioProtectionFuture.get();
+            if (!previousProtectionOk) {
+                std::cerr << "Warning: Windows default-audio protection failed: "
+                          << audioProtectionError << '\n';
+            }
+        }
+        audioProtectionError.clear();
+        // Start watching as soon as each virtual controller has accepted its
+        // initial state. This covers both the first attach and an automatic
+        // recreation without delaying HID readiness verification.
+        audioProtectionFuture = std::async(
+            std::launch::async,
+            [&audioProtection, &audioProtectionError]() {
+                return !audioProtection.captured() ||
+                       audioProtection.protectAfterVirtualDualSenseStart(
+                           std::chrono::milliseconds(2000), audioProtectionError);
+            });
+        return readNewVirtualDualSenseFirmware(
+            preexistingDualSensePaths, std::chrono::milliseconds(3000), probeError);
+    };
+    const auto waitForRemoval = [&preexistingDualSensePaths](std::string& removalError) {
+        return waitForNewVirtualDualSenseRemoval(
+            preexistingDualSensePaths, std::chrono::milliseconds(2000), removalError);
+    };
 
-    // Validate the complete physical -> virtual translation before hiding the
-    // original controller or allowing the game to start.
-    if (!virtualDualSense->updateInput(initialInput, error)) {
-        virtualDualSense->close();
-        return failSession(8, "Initial physical-to-DualSense input forwarding failed: " + error);
+    asb::dualsense::VirtualDualSenseStartupResult startupResult{};
+    if (!asb::dualsense::startVerifiedVirtualDualSense(
+            *virtualDualSense, initialInput, feedbackHandler, probeFirmware,
+            waitForRemoval, 2, startupResult, error)) {
+        if (audioProtectionFuture.valid()) {
+            (void)audioProtectionFuture.get();
+        }
+        std::cerr << error << '\n';
+        const int exitCode =
+            startupResult.failure ==
+                    asb::dualsense::VirtualDualSenseStartupFailure::BackendOpen
+                ? 6
+                : startupResult.failure ==
+                          asb::dualsense::VirtualDualSenseStartupFailure::InitialInput
+                      ? 8
+                      : 9;
+        return failSession(exitCode, error);
     }
-    const auto virtualInputReadyAt = std::chrono::steady_clock::now();
-
-    // Endpoint publication can take two seconds even when Windows ultimately
-    // leaves the default output unchanged. Observe it in parallel with the HID
-    // readiness/isolation work so it no longer stalls Playnite's launch hook.
-    auto audioProtectionFuture = std::async(
-        std::launch::async,
-        [&audioProtection, &audioProtectionError]() {
-            return !audioProtection.captured() ||
-                   audioProtection.protectAfterVirtualDualSenseStart(
-                       std::chrono::milliseconds(2000), audioProtectionError);
-        });
-
-    std::string firmwareError;
-    const auto virtualFirmware = readNewVirtualDualSenseFirmware(
-        preexistingDualSensePaths, std::chrono::milliseconds(1500), firmwareError);
-    if (!virtualFirmware) {
-        std::cerr << "Warning: virtual DualSense firmware verification failed: "
-                  << firmwareError << '\n';
+    const auto virtualInputReadyAt = startupResult.inputReadyAt;
+    const auto firmwareCheckedAt = startupResult.verifiedAt;
+    const auto virtualFirmware = startupResult.firmware;
+    if (startupResult.attempts > 1) {
+        std::cout << "Virtual DualSense readiness recovered after one automatic recreation.\n";
     }
-    const auto firmwareCheckedAt = std::chrono::steady_clock::now();
 
     using MonitorPtr = std::unique_ptr<asb::platform::HidTransport,
                                        void (*)(asb::platform::HidTransport*)>;
@@ -1028,6 +1051,8 @@ int commandBridgeTriggers(int argc, char** argv) {
                       << jsonEscape(virtualStats.backendVersion) << "\",\n"
                       << "  \"input_mode\": \"mandatory-full-proxy\",\n"
                       << "  \"input_backend\": \"" << jsonEscape(inputBackend) << "\",\n"
+                      << "  \"virtual_startup_attempts\": "
+                      << startupResult.attempts << ",\n"
                       << "  \"initialization_ms\": " << initializationMilliseconds << ",\n"
                       << "  \"initialization_physical_input_ms\": "
                       << physicalInputInitializationMilliseconds << ",\n"
@@ -1078,6 +1103,7 @@ int commandBridgeTriggers(int argc, char** argv) {
               << "input_mode=mandatory-full-proxy\n"
               << "input_backend=" << inputBackend << '\n'
               << "input_event_driven=" << (inputSource->eventDriven() ? "yes" : "no") << '\n'
+              << "virtual_startup_attempts=" << startupResult.attempts << '\n'
               << "runtime_ms=" << runtimeMilliseconds << '\n'
               << "initialization_ms=" << initializationMilliseconds << '\n'
               << "initialization_physical_input_ms="
