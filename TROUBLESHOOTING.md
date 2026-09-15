@@ -206,16 +206,38 @@ If the PC lost power or a game crashed unexpectedly while the controller was hid
 
 ## 5. Driver Installation Issues, USBip Stability & Portable Version
 
+### Keyboard or mouse input after uninstalling ApexSenseBridge / USBip
+
+USBip installs a device-specific USB filter driver. Removing that package can
+temporarily interrupt USB devices and an incomplete upstream uninstall can
+leave the Windows USB stack in an inconsistent state even though the keyboard
+and mouse still work in firmware/BIOS.
+
+- ApexSenseBridge never removes USBip, including during silent uninstall. If it
+  must be removed, do so separately through Windows Settings with a recovery
+  input path available, then restart Windows.
+- HidHide is preserved by default. Interactive removal is a separate,
+  default-No choice offered only when its fresh-install provenance, exact
+  version, service and product registration are verified.
+- Settings, logs, learned associations and Playnite profiles are preserved by
+  default. `/REMOVEUSERDATA` is the only silent deletion opt-in and never
+  authorizes driver removal.
+- If HidHide removal was explicitly selected, restart Windows before judging
+  device state. Do not manually delete OEM driver packages with `pnputil`.
+- If keyboard/mouse input works in BIOS but not Windows, use Windows Recovery
+  to enter Safe Mode or System Restore and repair/remove USBip from Windows
+  Settings. Keep the ApexSenseBridge and USBip logs for diagnosis.
+
 ### Installer reports that USBip failed although `usbip-install.log` says success
 
 Versions 0.6.0 and 0.6.1 could query an incorrectly escaped uninstall-registry
 key after the bundled USBip installer returned success. This produced a false
 failure and could be reported as unregistered driver remnants on the next run.
-The registry verification is corrected in 0.6.2.
+The registry verification is corrected in 0.6.2 and later.
 
 - Do not repeatedly run the older setup or remove driver packages manually.
 - If USBip 0.9.7.x is installed, uninstall it from Windows Settings and restart.
-- Then run the 0.6.2 installer, which validates the registered 0.9.8.0 package
+- Then run the current installer, which validates the registered 0.9.8.0 package
   and both `usbip2_ude`/`usbip2_filter` services against the correct key.
 
 ### Known Upstream `usbip-win2` Kernel Issue (Not Caused by ApexSenseBridge)

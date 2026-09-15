@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.3
+
+Full validation and uninstall-policy details are available in
+[`RELEASE_NOTES_0.6.3.md`](RELEASE_NOTES_0.6.3.md).
+
+- Never removes usbip-win2 from the ApexSenseBridge uninstaller. The Control
+  Panel and silent uninstall no longer expose the legacy dependency-removal
+  switch, so the upstream USB filter can only be removed separately by the user
+  through Windows Settings.
+- Preserves HidHide unless the user accepts a separate default-No prompt and a
+  fresh-install provenance marker, exact version, product registration and
+  service check all succeed. Incomplete or foreign HidHide installations are
+  rejected during setup instead of being overwritten.
+- Preserves settings, logs, learned bindings and Playnite profiles by default.
+  Their separate removal prompt defaults to No; silent deletion requires the
+  data-only `/REMOVEUSERDATA` switch.
+- Restricts automatic updates to the exact setup asset in the official GitHub
+  repository, validates product/version metadata and a trusted Authenticode
+  signature, and pins the signer to the installed ApexSenseBridge publisher.
+- Adds release contracts for source/tag version consistency, exact artifact
+  naming, checksums and publisher signatures, and runs the full CTest suite
+  before GitHub can publish a release.
+- Closes a narrow Tray shutdown race so a newly learned executable binding is
+  marked for synchronous persistence before it becomes visible to readers.
+
 ## 0.6.2
 
 Full upgrade instructions, issue references and validation notes are available

@@ -99,6 +99,9 @@
     <Compile Include="Services\ProcessMonitorService.cs" />
     <Compile Include="Services\EngineSessionManager.cs" />
     <Compile Include="Services\UpdateCheckerService.cs" />
+    <Compile Include="..\shared\ReleaseSecurity.cs">
+      <Link>Common\ReleaseSecurity.cs</Link>
+    </Compile>
     <Compile Include="Common\NativeMethods.cs" />
     <Compile Include="Common\AppLog.cs" />
     <Compile Include="Common\BridgeSession.cs" />

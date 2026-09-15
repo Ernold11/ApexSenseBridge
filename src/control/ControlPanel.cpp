@@ -16,7 +16,7 @@ constexpr wchar_t kWindowClass[] = L"ApexSenseBridge.ControlPanel";
 constexpr int kDiagnosticButton = 101;
 constexpr int kRestoreButton = 102;
 constexpr int kLogsButton = 103;
-constexpr int kFullUninstallButton = 104;
+constexpr int kUninstallButton = 104;
 constexpr int kOutputEdit = 201;
 
 bool isFrenchLocale() {
@@ -166,7 +166,7 @@ void createControls(HWND window) {
     addButton(kDiagnosticButton, isFrenchLocale() ? L"Tester l'APEX" : L"Test APEX", 18, 130);
     addButton(kRestoreButton, isFrenchLocale() ? L"Restaurer HidHide" : L"Restore HidHide", 158, 172);
     addButton(kLogsButton, isFrenchLocale() ? L"Ouvrir les journaux" : L"Open Logs", 340, 145);
-    addButton(kFullUninstallButton, isFrenchLocale() ? L"Désinstallation complète…" : L"Full Uninstall…", 495, 180);
+    addButton(kUninstallButton, isFrenchLocale() ? L"Désinstaller…" : L"Uninstall…", 495, 180);
 
     HWND edit = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"",
@@ -216,20 +216,20 @@ void openLogs(HWND window) {
     }
 }
 
-void startFullUninstall(HWND window) {
+void startUninstall(HWND window) {
     const int confirmation = MessageBoxW(
         window,
         isFrenchLocale()
-            ? L"Cette option désinstalle ApexSenseBridge puis demande aussi la suppression des "
-              L"pilotes usbip-win2 et HidHide, même s'ils étaient déjà présents. Continuer ?"
-            : L"This option uninstalls ApexSenseBridge and requests removal of "
-              L"usbip-win2 and HidHide drivers, even if they were already present. Continue?",
-        isFrenchLocale() ? L"Désinstallation complète" : L"Full Uninstall",
+            ? L"Désinstaller ApexSenseBridge ? Les pilotes et les données utilisateur "
+              L"seront conservés par défaut. Le désinstalleur proposera séparément les options sûres."
+            : L"Uninstall ApexSenseBridge? Drivers and user data are kept by default. "
+              L"The uninstaller will offer safe options separately.",
+        isFrenchLocale() ? L"Désinstaller ApexSenseBridge" : L"Uninstall ApexSenseBridge",
         MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
     if (confirmation != IDYES) return;
     const auto uninstaller = readMachineString(L"UninstallExecutable");
     if (uninstaller.empty() || reinterpret_cast<INT_PTR>(ShellExecuteW(
-            window, L"runas", uninstaller.c_str(), L"/REMOVEDEPENDENCIES",
+            window, L"runas", uninstaller.c_str(), nullptr,
             moduleDirectory().c_str(), SW_SHOWNORMAL)) <= 32) {
         MessageBoxW(window, isFrenchLocale() ? L"Le programme de désinstallation est introuvable ou n'a pas été autorisé."
                                             : L"The uninstaller was not found or was not granted permission.",
@@ -275,8 +275,8 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message,
             openLogs(window);
             return 0;
         }
-        if (id == kFullUninstallButton) {
-            startFullUninstall(window);
+        if (id == kUninstallButton) {
+            startUninstall(window);
             return 0;
         }
         break;

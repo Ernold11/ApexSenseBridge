@@ -19,6 +19,11 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Verify source version matches release tag
+        shell: powershell
+        run: |
+          .\scripts\verify-version-consistency.ps1
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
@@ -49,6 +54,13 @@ jobs:
           ASB_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.ASB_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           .\scripts\build-installer.ps1 -RequireSigning
+
+      - name: Test and verify signed release artifacts
+        shell: powershell
+        run: |
+          ctest --test-dir .\build-win -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\scripts\verify-version-consistency.ps1 -CheckArtifacts -RequireSignatures
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

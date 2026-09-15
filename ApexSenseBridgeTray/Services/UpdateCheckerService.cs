@@ -1,4 +1,5 @@
 using ApexSenseBridgeTray.Common;
+using ApexSenseBridge.Security;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -43,7 +44,7 @@ namespace ApexSenseBridgeTray.Services
             catch
             {
             }
-            return "0.6.2";
+            return "0.6.3";
         }
 
         public async Task<UpdateInfo> CheckForUpdatesAsync(bool silent)
@@ -108,11 +109,13 @@ namespace ApexSenseBridgeTray.Services
                                     if (asset != null && asset.ContainsKey("name") && asset["name"] != null)
                                     {
                                         string name = asset["name"].ToString();
-                                        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
-                                            asset.ContainsKey("browser_download_url") &&
-                                            asset["browser_download_url"] != null)
+                                        string downloadUrl = asset.ContainsKey("browser_download_url") &&
+                                            asset["browser_download_url"] != null
+                                            ? asset["browser_download_url"].ToString()
+                                            : string.Empty;
+                                        if (ReleaseSecurity.IsExpectedSetupAsset(name, downloadUrl))
                                         {
-                                            info.InstallerUrl = asset["browser_download_url"].ToString();
+                                            info.InstallerUrl = downloadUrl;
                                             break;
                                         }
                                     }
@@ -182,22 +185,41 @@ namespace ApexSenseBridgeTray.Services
             {
                 try
                 {
-                    string tempPath = Path.Combine(Path.GetTempPath(), "ApexSenseBridge-Setup.exe");
+                    string tempPath = Path.Combine(
+                        Path.GetTempPath(),
+                        "ApexSenseBridge-Setup-" + Guid.NewGuid().ToString("N") + ".exe");
                     using (WebClient wc = new WebClient())
                     {
                         wc.DownloadFile(info.InstallerUrl, tempPath);
                     }
 
-                    if (File.Exists(tempPath))
+                    string verificationError;
+                    if (ReleaseSecurity.VerifyInstaller(
+                        tempPath,
+                        info.LatestVersion,
+                        Assembly.GetExecutingAssembly().Location,
+                        out verificationError))
                     {
                         ProcessStartInfo psi = new ProcessStartInfo(tempPath);
                         psi.UseShellExecute = true;
                         Process.Start(psi);
                         return;
                     }
+                    try { File.Delete(tempPath); } catch { }
+                    MessageBox.Show(
+                        "The downloaded installer was not launched because its identity could not be verified.\n\n" +
+                        verificationError,
+                        LocalizationManager.Get("Loc_UpdateDialogTitle"),
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    MessageBox.Show(
+                        LocalizationManager.Get("Loc_UpdateError") + ex.Message,
+                        LocalizationManager.Get("Loc_UpdateDialogTitle"),
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
                 }
             }
 

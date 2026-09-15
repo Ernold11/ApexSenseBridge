@@ -47,7 +47,7 @@ namespace asb::cli {
 
 void printUsage() {
     std::cout
-        << "ApexSenseBridge 0.6.2\n\n"
+        << "ApexSenseBridge 0.6.3\n\n"
         << "Commands:\n"
         << "  list                         List APEX 4/5 vendor HID candidates\n"
         << "  diagnose [--all-hid] [--json]\n"
