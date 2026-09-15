@@ -8,12 +8,15 @@ dist/
 bin/
 obj/
 out/
+Output/
+artifacts/
 x64/
 ARM64/
 Debug/
 Release/
 RelWithDebInfo/
 MinSizeRel/
+*.binlog
 
 # Compiled binaries and debug symbols generated outside a build directory
 *.exe
@@ -25,6 +28,8 @@ MinSizeRel/
 *.ilk
 *.obj
 *.pext
+*.nupkg
+*.snupkg
 *.[pP][fF][xX]
 *.[pP]12
 
@@ -37,6 +42,7 @@ Apex4-Full-Session-Tester/
 .local-backups/
 *.log
 *.dmp
+*.mdmp
 *.trace
 captures/
 logs/
@@ -57,6 +63,17 @@ packages/
 *.tar
 *.tar.gz
 
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Test/runtime generated results (test source code remains versioned)
 Testing/
 test-results/
@@ -75,6 +92,10 @@ coverage/
 *.suo
 *.userosscache
 *.sln.docstates
+*.userprefs
+*.DotSettings.user
+_ReSharper*/
+.dotnet/
 *.VC.db
 *.VC.opendb
 
@@ -92,7 +113,19 @@ Makefile
 
 # OS files
 Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
 .DS_Store
+$RECYCLE.BIN/
+
+# Editor backup, swap and patch artifacts
+*~
+*.bak
+*.swp
+*.swo
+*.orig
+*.rej
 
 # Design specifications
 DESIGN.md
@@ -104,6 +137,8 @@ ApexSenseBridge-PROJECT_BRIEF_CODEX.md
 *BRIEF*
 *CODEX*
 *PROMPT*
+*REVERSE_ENGINEERING*
+*REVERSE-ENGINEERING*
 *.draft.md
 *.notes
 notes/
@@ -117,6 +152,12 @@ TODO.local*
 .agent/
 .agents/
 .gemini/
+.claude/
+.cursor/
+.cline/
+.roo/
+.continue/
 
 # Tray temporary logs
 tray_*.log
+
