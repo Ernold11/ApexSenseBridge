@@ -1293,7 +1293,10 @@ bool recoverPendingImpl(bool& recovered, std::string& error) {
 
     error.clear();
     if (!inputTransportRestored) error = inputTransportError;
-    if (!profileRestored) error = profileError;
+    if (!profileRestored) {
+        if (!error.empty()) error += "; ";
+        error += profileError;
+    }
     if (!visibilityRestored) {
         if (!error.empty()) error += "; ";
         error += visibilityError;

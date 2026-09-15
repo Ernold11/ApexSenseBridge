@@ -431,19 +431,13 @@ namespace ApexSenseBridgeTray
 
         private void OnGamepadModeChanged(bool isGamepad)
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            isGamepadMode = isGamepad;
+            UpdateGamepadHudVisibility(isGamepad);
+            if (isGamepad)
             {
-                isGamepadMode = isGamepad;
-                UpdateGamepadHudVisibility(isGamepad);
-                if (isGamepad)
-                {
-                    if (navIndex < 0) SetNavFocus(0);
-                }
-                else
-                {
-                    ClearNavFocus();
-                }
-            }));
+                if (navIndex < 0) SetNavFocus(0);
+            }
+            else ClearNavFocus();
         }
 
         private void UpdateGamepadHudVisibility(bool isGamepad)
@@ -470,31 +464,24 @@ namespace ApexSenseBridgeTray
 
         private void OnGamepadUp()
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            if (navIndex <= 0) return;
+            int target = navIndex - 1;
+            while (target >= 0 && !navItems[target].IsEnabled)
             {
-                if (navIndex <= 0) return;
-                // Skip disabled criteria items
-                int target = navIndex - 1;
-                while (target >= 0 && !navItems[target].IsEnabled)
-                {
-                    target--;
-                }
-                if (target >= 0) SetNavFocus(target);
-            }));
+                target--;
+            }
+            if (target >= 0) SetNavFocus(target);
         }
 
         private void OnGamepadDown()
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            if (navIndex >= navItems.Count - 1) return;
+            int target = navIndex + 1;
+            while (target < navItems.Count && !navItems[target].IsEnabled)
             {
-                if (navIndex >= navItems.Count - 1) return;
-                int target = navIndex + 1;
-                while (target < navItems.Count && !navItems[target].IsEnabled)
-                {
-                    target++;
-                }
-                if (target < navItems.Count) SetNavFocus(target);
-            }));
+                target++;
+            }
+            if (target < navItems.Count) SetNavFocus(target);
         }
 
         private void SetNavFocus(int index)
@@ -555,30 +542,22 @@ namespace ApexSenseBridgeTray
 
         private void OnGamepadAction(GamepadButtonAction action)
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            switch (action)
             {
-                switch (action)
-                {
-                    case GamepadButtonAction.Back:
-                        Hide();
-                        break;
-
-                    case GamepadButtonAction.ActionY:
-                        OnOpenGameListClick(null, null);
-                        break;
-
-                    case GamepadButtonAction.ActionX:
-                        if (BtnExcludeCurrentGame != null && BtnExcludeCurrentGame.Visibility == Visibility.Visible)
-                        {
-                            OnExcludeCurrentGameClick(null, null);
-                        }
-                        break;
-
-                    case GamepadButtonAction.Select:
-                        ActivateCurrentNavItem();
-                        break;
-                }
-            }));
+                case GamepadButtonAction.Back:
+                    Hide();
+                    break;
+                case GamepadButtonAction.ActionY:
+                    OnOpenGameListClick(null, null);
+                    break;
+                case GamepadButtonAction.ActionX:
+                    if (BtnExcludeCurrentGame != null && BtnExcludeCurrentGame.Visibility == Visibility.Visible)
+                        OnExcludeCurrentGameClick(null, null);
+                    break;
+                case GamepadButtonAction.Select:
+                    ActivateCurrentNavItem();
+                    break;
+            }
         }
 
         private void ActivateCurrentNavItem()
@@ -628,13 +607,10 @@ namespace ApexSenseBridgeTray
 
         private void OnGamepadScroll(double deltaY)
         {
-            Dispatcher.BeginInvoke(new Action(() =>
+            if (ScrollMain != null)
             {
-                if (ScrollMain != null)
-                {
-                    ScrollMain.ScrollToVerticalOffset(ScrollMain.VerticalOffset + deltaY);
-                }
-            }));
+                ScrollMain.ScrollToVerticalOffset(ScrollMain.VerticalOffset + deltaY);
+            }
         }
 
         protected override void OnClosed(EventArgs e)
