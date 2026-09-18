@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-17T09:15:27.751623+00:00",
-  "totalGames": 210,
+  "updatedAt": "2026-09-18T08:50:04.969966+00:00",
+  "totalGames": 211,
   "discordExecutableGames": 127,
   "games": [
     {
@@ -384,6 +384,16 @@
       "executables": [
         "cotwtheangler_steam.exe"
       ]
+    },
+    {
+      "title": "Clive Barker's Hellraiser: Revival",
+      "normalized": "clivebarkershellraiserrevival",
+      "adaptiveTriggers": true,
+      "hapticFeedback": false,
+      "profile": "standard",
+      "steamAppId": 1551980,
+      "steamAppIdVerified": true,
+      "iconUrl": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1551980/library_600x900.jpg"
     },
     {
       "title": "Cloudheim",
