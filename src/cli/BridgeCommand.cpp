@@ -43,6 +43,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h>
+#elif defined(__linux__)
+#include <fstream>
+#include <unistd.h>
 #endif
 
 namespace asb::cli {
@@ -87,6 +90,26 @@ struct ProcessUsageSnapshot {
     std::uint64_t peakWorkingSetBytes = 0;
 };
 
+#ifdef __linux__
+// /proc/self/status reports VmRSS and VmHWM in kibibytes.
+std::uint64_t procStatusKibibytes(const char* key) noexcept {
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    const std::string prefix(key);
+    while (std::getline(status, line)) {
+        if (line.compare(0, prefix.size(), prefix) != 0) {
+            continue;
+        }
+        const auto digits = line.find_first_of("0123456789");
+        if (digits == std::string::npos) {
+            return 0;
+        }
+        return static_cast<std::uint64_t>(std::strtoull(line.c_str() + digits, nullptr, 10));
+    }
+    return 0;
+}
+#endif
+
 ProcessUsageSnapshot processUsageSnapshot() noexcept {
     ProcessUsageSnapshot snapshot{};
 #ifdef _WIN32
@@ -106,6 +129,38 @@ ProcessUsageSnapshot processUsageSnapshot() noexcept {
         snapshot.workingSetBytes = counters.WorkingSetSize;
         snapshot.peakWorkingSetBytes = counters.PeakWorkingSetSize;
     }
+#elif defined(__linux__)
+    // Field 14 (utime) and 15 (stime) of /proc/self/stat are in clock ticks.
+    // They are converted to the same 100 ns unit Windows reports so the
+    // telemetry JSON schema stays identical across platforms.
+    std::ifstream stat("/proc/self/stat");
+    std::string contents;
+    if (std::getline(stat, contents)) {
+        // The second field is the comm name in parentheses and may itself
+        // contain spaces, so fields are counted from after the closing one.
+        const auto commEnd = contents.rfind(')');
+        if (commEnd != std::string::npos) {
+            std::istringstream fields(contents.substr(commEnd + 1));
+            std::string field;
+            unsigned long long utime = 0;
+            unsigned long long stime = 0;
+            for (int index = 3; index <= 15; ++index) {
+                if (!(fields >> field)) {
+                    break;
+                }
+                if (index == 14) utime = std::strtoull(field.c_str(), nullptr, 10);
+                if (index == 15) stime = std::strtoull(field.c_str(), nullptr, 10);
+            }
+            const long ticksPerSecond = ::sysconf(_SC_CLK_TCK);
+            if (ticksPerSecond > 0) {
+                const auto ticks = utime + stime;
+                snapshot.cpu100ns = static_cast<std::uint64_t>(
+                    (ticks * 10'000'000ULL) / static_cast<unsigned long long>(ticksPerSecond));
+            }
+        }
+    }
+    snapshot.workingSetBytes = procStatusKibibytes("VmRSS:") * 1024;
+    snapshot.peakWorkingSetBytes = procStatusKibibytes("VmHWM:") * 1024;
 #endif
     return snapshot;
 }
@@ -391,6 +446,18 @@ int commandBridgeTriggers(int argc, char** argv) {
         return exitCode;
     };
 
+    // Before touching the pad at all: a controller daemon holding the vendor
+    // interface makes the identity exchange below fail with "no vendor HID
+    // interface found", which reads as a hardware problem rather than a
+    // conflict. Whatever this suspends is restored by restore() or by the
+    // object's destructor, so the early returns between here and activate()
+    // cannot strand it.
+    asb::platform::TemporaryPhysicalControllerIsolation physicalIsolation;
+    if (!physicalIsolation.suspendConflictingDaemons(error)) {
+        std::cerr << "Temporary APEX isolation failed: " << error << '\n';
+        return failSession(11, "Temporary APEX isolation failed: " + error);
+    }
+
     auto device = openSelectedIndex(options.deviceIndex, error);
     if (!device) {
         const std::string message = "APEX identity check failed: " + error;
@@ -583,7 +650,6 @@ int commandBridgeTriggers(int argc, char** argv) {
         }
     }
 
-    asb::platform::TemporaryPhysicalControllerIsolation physicalIsolation;
     if (!physicalIsolation.activate(
             device->info(), options.sessionToken.value_or(""),
             profileSwitchRequired
@@ -671,6 +737,10 @@ int commandBridgeTriggers(int argc, char** argv) {
                 4, "Could not establish a Normal trigger baseline after the "
                    "Apex 5 profile switch: " + baselineError);
         }
+        // Selecting a profile reapplies that slot's trigger modes and the
+        // reset above undoes them, so the bridge's idea of what the pad was
+        // last told is stale in both directions until it is told.
+        bridge.noteNormalBaseline();
         if (options.routeRumble && !device->stopRumble(baselineError)) {
             return rollbackFailedProfileStartup(
                 12, "Could not establish a stopped grip-rumble baseline after "

@@ -5,8 +5,10 @@
 #include "flydigi/Apex5Identity.h"
 #include "platform/HidTransport.h"
 
+#include <chrono>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -54,12 +56,25 @@ public:
                            std::string& error);
 
 private:
+    // Effect and rumble writes go through here rather than straight to the
+    // transport. Two vendor commands sent close together lose the second one:
+    // measured on an Apex 4, a release followed 4.3 ms later by an effect leaves
+    // no resistance at all, while the same pair 10 ms apart works every time.
+    //
+    // That is exactly the shape a game produces. Cyberpunk 2077 sends a release
+    // and then the effect 4.3 ms later on every aim after the first, and applies
+    // both triggers from one report - so the left trigger, written second, was
+    // the one that always vanished.
+    [[nodiscard]] bool writeSpacedOutputReport(std::span<const std::uint8_t> report,
+                                               std::string& error);
+
     [[nodiscard]] bool mayWriteEffects(std::string& error) const;
     [[nodiscard]] bool mayControlProfiles(std::string& error) const;
     [[nodiscard]] bool usesApex4Protocol() const noexcept;
 
     TransportPtr transport_{};
     std::optional<Apex5Identity> identity_{};
+    std::chrono::steady_clock::time_point lastVendorWriteAt_{};
 };
 
 } // namespace asb::flydigi
