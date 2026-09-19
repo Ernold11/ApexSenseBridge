@@ -596,6 +596,13 @@ int commandBridgeTriggers(int argc, char** argv) {
             preexistingDualSensePaths, std::chrono::milliseconds(2000), removalError);
     };
 
+    // Before anything can deliver feedback. From here the bridges hand their
+    // writes to this thread instead of sleeping out the pad's 25 ms inside the
+    // virtual device's output callback.
+    if (!device->startAsyncWrites(error)) {
+        return failSession(11, error);
+    }
+
     asb::dualsense::VirtualDualSenseStartupResult startupResult{};
     if (!asb::dualsense::startVerifiedVirtualDualSense(
             *virtualDualSense, initialInput, feedbackHandler, probeFirmware,
@@ -1052,6 +1059,14 @@ int commandBridgeTriggers(int argc, char** argv) {
                   << neutralizationError << '\n';
     }
     virtualDualSense->close(); // joins the feedback callback before touching the HID device
+    // Nothing can queue a write now that the callback is joined, so the writer
+    // can be drained and joined too. The resets below then take the synchronous
+    // path and report their own failures directly, as they always did.
+    device->stopAsyncWrites();
+    std::string queuedWriteError;
+    if (device->takeAsyncWriteError(queuedWriteError)) {
+        std::cerr << "Warning: a queued APEX write failed: " << queuedWriteError << '\n';
+    }
     const auto virtualStats = virtualDualSense->stats();
     const auto touchpadGestureStats = touchpadGestureMapper.stats();
     const auto bridgeStats = bridge.stats();

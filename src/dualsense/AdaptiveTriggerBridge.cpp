@@ -57,7 +57,7 @@ bool AdaptiveTriggerBridge::writeNow(TriggerSide side,
                                      const ForceTriggerCommand& command,
                                      std::uint8_t dualSenseType) {
     std::string writeError;
-    if (!device_.setTriggerRaw(command, writeError)) {
+    if (!device_.queueTriggerRaw(command, writeError)) {
         writeFailures_.fetch_add(1, std::memory_order_relaxed);
         {
             std::lock_guard lock(errorMutex_);

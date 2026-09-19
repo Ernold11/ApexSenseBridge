@@ -557,4 +557,146 @@ bool Apex5Device::setInputTransport(bool controllerData, bool rawData,
     return true;
 }
 
+Apex5Device::~Apex5Device() {
+    stopAsyncWrites();
+}
+
+Apex5Device::Apex5Device(Apex5Device&& other) noexcept {
+    other.stopAsyncWrites();
+    transport_ = std::move(other.transport_);
+    identity_ = std::move(other.identity_);
+    lastVendorWriteAt_ = other.lastVendorWriteAt_;
+}
+
+Apex5Device& Apex5Device::operator=(Apex5Device&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    stopAsyncWrites();
+    other.stopAsyncWrites();
+    transport_ = std::move(other.transport_);
+    identity_ = std::move(other.identity_);
+    lastVendorWriteAt_ = other.lastVendorWriteAt_;
+    return *this;
+}
+
+bool Apex5Device::startAsyncWrites(std::string& error) {
+    if (writer_.joinable()) {
+        return true;
+    }
+    if (!transport_) {
+        error = "APEX device is not open";
+        return false;
+    }
+    {
+        std::lock_guard lock(queueMutex_);
+        writerStopping_ = false;
+        pendingLeftTrigger_.reset();
+        pendingRightTrigger_.reset();
+        pendingRumble_.reset();
+        nextSlot_ = 0;
+    }
+    asyncWriteFailed_.store(false, std::memory_order_relaxed);
+    writer_ = std::thread([this] { writerLoop(); });
+    return true;
+}
+
+void Apex5Device::stopAsyncWrites() noexcept {
+    if (!writer_.joinable()) {
+        return;
+    }
+    {
+        std::lock_guard lock(queueMutex_);
+        writerStopping_ = true;
+    }
+    queueSignal_.notify_all();
+    writer_.join();
+}
+
+bool Apex5Device::queueTriggerRaw(const ForceTriggerCommand& command,
+                                  std::string& error) {
+    if (!writer_.joinable()) {
+        return setTriggerRaw(command, error);
+    }
+    {
+        std::lock_guard lock(queueMutex_);
+        (command.side == TriggerSide::Left ? pendingLeftTrigger_
+                                           : pendingRightTrigger_) = command;
+    }
+    queueSignal_.notify_one();
+    return true;
+}
+
+bool Apex5Device::queueRumble(std::uint8_t lowFrequencyMotor,
+                              std::uint8_t highFrequencyMotor,
+                              std::string& error) {
+    if (!writer_.joinable()) {
+        return setRumble(lowFrequencyMotor, highFrequencyMotor, error);
+    }
+    {
+        std::lock_guard lock(queueMutex_);
+        pendingRumble_ = std::pair{lowFrequencyMotor, highFrequencyMotor};
+    }
+    queueSignal_.notify_one();
+    return true;
+}
+
+bool Apex5Device::takeAsyncWriteError(std::string& error) {
+    if (!asyncWriteFailed_.exchange(false, std::memory_order_acq_rel)) {
+        return false;
+    }
+    std::lock_guard lock(asyncErrorMutex_);
+    error = asyncError_;
+    return true;
+}
+
+void Apex5Device::writerLoop() {
+    for (;;) {
+        std::optional<ForceTriggerCommand> trigger;
+        std::optional<std::pair<std::uint8_t, std::uint8_t>> rumble;
+        {
+            std::unique_lock lock(queueMutex_);
+            queueSignal_.wait(lock, [this] {
+                return writerStopping_ || pendingLeftTrigger_ || pendingRightTrigger_ ||
+                       pendingRumble_;
+            });
+            if (writerStopping_) {
+                return;
+            }
+            // Round-robin rather than a fixed order. Writing one slot first
+            // every time is what made the left trigger the command that always
+            // went missing, and starving a slot under a fast game would be the
+            // same bug wearing the spacing as a disguise.
+            for (unsigned attempt = 0; attempt < 3; ++attempt) {
+                const unsigned slot = (nextSlot_ + attempt) % 3;
+                if (slot == 0 && pendingLeftTrigger_) {
+                    trigger = std::exchange(pendingLeftTrigger_, std::nullopt);
+                } else if (slot == 1 && pendingRightTrigger_) {
+                    trigger = std::exchange(pendingRightTrigger_, std::nullopt);
+                } else if (slot == 2 && pendingRumble_) {
+                    rumble = std::exchange(pendingRumble_, std::nullopt);
+                } else {
+                    continue;
+                }
+                nextSlot_ = (slot + 1) % 3;
+                break;
+            }
+        }
+
+        // Outside the lock: this is where the 25 ms is spent, and holding the
+        // queue through it would stall the very callers this exists to release.
+        std::string error;
+        const bool ok = trigger ? setTriggerRaw(*trigger, error)
+                      : rumble  ? setRumble(rumble->first, rumble->second, error)
+                                : true;
+        if (!ok) {
+            {
+                std::lock_guard lock(asyncErrorMutex_);
+                asyncError_ = std::move(error);
+            }
+            asyncWriteFailed_.store(true, std::memory_order_release);
+        }
+    }
+}
+
 } // namespace asb::flydigi

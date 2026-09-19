@@ -5,11 +5,17 @@
 #include "flydigi/Apex5Identity.h"
 #include "platform/HidTransport.h"
 
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace asb::flydigi {
@@ -28,8 +34,18 @@ public:
 
     Apex5Device(const Apex5Device&) = delete;
     Apex5Device& operator=(const Apex5Device&) = delete;
-    Apex5Device(Apex5Device&&) noexcept = default;
-    Apex5Device& operator=(Apex5Device&&) noexcept = default;
+
+    // Joins the writer thread if one is running: it borrows this object's
+    // transport, so it must not outlive it.
+    ~Apex5Device();
+
+    // Movable, but the writer thread does not travel: it captures this object's
+    // address, so carrying it across a move would leave it writing through a
+    // transport that had moved away. Both sides are stopped first. In practice
+    // nothing moves an opened device - open() moves the freshly built one out,
+    // before any writer exists.
+    Apex5Device(Apex5Device&& other) noexcept;
+    Apex5Device& operator=(Apex5Device&& other) noexcept;
 
     [[nodiscard]] static std::vector<HidDeviceInfo> findCandidates(std::string& error);
     [[nodiscard]] static std::optional<Apex5Device> open(const HidDeviceInfo& info, std::string& error);
@@ -55,6 +71,34 @@ public:
     bool setInputTransport(bool controllerData, bool rawData,
                            std::string& error);
 
+    // The asynchronous write path, for the feedback bridges only.
+    //
+    // The 25 ms this pad needs between vendor commands used to be spent asleep
+    // inside the feedback callback. That callback is the virtual device's
+    // output path: uhid does not acknowledge a SET_REPORT until it returns and
+    // libVIIPER holds its callback mutex throughout, so one report changing
+    // both triggers and rumble could hold the game's write waiting for three
+    // spacings. Worse, whatever had queued up behind it was applied afterwards,
+    // by which time the game had usually asked for something else.
+    //
+    // These hand the newest value for a slot to a writer thread and return at
+    // once. A slot written twice before the thread reaches it sends only the
+    // newer value - coalescing, not a queue, because replaying a superseded
+    // effect is the behaviour being removed, not preserved.
+    bool startAsyncWrites(std::string& error);
+    void stopAsyncWrites() noexcept;
+
+    // With no writer thread running - every diagnostic command, and the tests -
+    // these write synchronously and report failure by return value exactly as
+    // before, so only the bridge path changes behaviour.
+    bool queueTriggerRaw(const ForceTriggerCommand& command, std::string& error);
+    bool queueRumble(std::uint8_t lowFrequencyMotor, std::uint8_t highFrequencyMotor,
+                     std::string& error);
+
+    // A queued write that failed after its caller had gone. Latched, and
+    // cleared by reading, so a caller polling this cannot miss one.
+    bool takeAsyncWriteError(std::string& error);
+
 private:
     // Effect and rumble writes go through here rather than straight to the
     // transport. Two vendor commands sent close together lose the second one:
@@ -72,9 +116,26 @@ private:
     [[nodiscard]] bool mayControlProfiles(std::string& error) const;
     [[nodiscard]] bool usesApex4Protocol() const noexcept;
 
+    void writerLoop();
+
     TransportPtr transport_{};
     std::optional<Apex5Identity> identity_{};
     std::chrono::steady_clock::time_point lastVendorWriteAt_{};
+
+    // Newest value per slot. The three share one spacing budget because the pad
+    // does: the budget belongs to the device, not to either trigger.
+    std::thread writer_{};
+    std::mutex queueMutex_{};
+    std::condition_variable queueSignal_{};
+    std::optional<ForceTriggerCommand> pendingLeftTrigger_{};
+    std::optional<ForceTriggerCommand> pendingRightTrigger_{};
+    std::optional<std::pair<std::uint8_t, std::uint8_t>> pendingRumble_{};
+    unsigned nextSlot_ = 0;
+    bool writerStopping_ = false;
+
+    std::atomic<bool> asyncWriteFailed_{false};
+    std::mutex asyncErrorMutex_{};
+    std::string asyncError_{};
 };
 
 } // namespace asb::flydigi
