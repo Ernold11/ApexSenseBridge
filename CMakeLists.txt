@@ -358,4 +358,23 @@ if(BUILD_TESTING)
                          -ExecutionPolicy Bypass
                          -File ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify-version-consistency.ps1)
     endif()
+
+    # Every test asserts its expectations, and a Release build defines NDEBUG,
+    # which compiles those asserts away and leaves the suite passing without
+    # checking anything. Each test file opens with an #undef, but two had
+    # already drifted without it and went green in Release for months, so the
+    # guarantee is made here as well - once, for every target, including any
+    # added later.
+    get_property(asb_directory_targets
+                 DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                 PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(asb_target IN LISTS asb_directory_targets)
+        if(asb_target MATCHES "^ApexSenseBridge.*Tests$")
+            if(MSVC)
+                target_compile_options(${asb_target} PRIVATE /UNDEBUG)
+            else()
+                target_compile_options(${asb_target} PRIVATE -UNDEBUG)
+            endif()
+        endif()
+    endforeach()
 endif()
