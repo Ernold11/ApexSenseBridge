@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <iostream>
 #include <string>
 #include <utility>
 
@@ -64,6 +65,55 @@ private:
     std::string reason_;
 };
 
+// Auto promises a session that starts. A preflight can only ask whether the
+// library is there, not whether it loads, exports what this build calls, or
+// manages to attach - and a library that fails any of those took the session
+// down with it, on a machine where uhid would have worked. So Auto tries
+// libVIIPER and, if opening it fails, says so and continues on uhid. An
+// explicit --virtual-backend integrated still fails hard: that asked for one
+// backend by name.
+class FallbackVirtualDualSense final : public VirtualDualSense {
+public:
+    explicit FallbackVirtualDualSense(VirtualDualSenseOptions options)
+        : options_(std::move(options)) {}
+
+    bool open(std::string& error, FeedbackHandler handler = {}) override {
+        active_ = createLibViiperVirtualDualSense(options_);
+        std::string libViiperError;
+        if (active_ && active_->open(libViiperError, handler)) {
+            return true;
+        }
+        if (active_) {
+            active_->close();
+        }
+        std::cerr << "The libVIIPER backend did not start (" << libViiperError
+                  << "); continuing on uhid, which carries everything except "
+                     "DualSense audio haptics.\n";
+        active_ = createUhidVirtualDualSense(options_);
+        if (!active_) {
+            error = "no virtual DualSense backend could be created";
+            return false;
+        }
+        return active_->open(error, std::move(handler));
+    }
+
+    void close() noexcept override { if (active_) active_->close(); }
+    bool updateInput(const DualSenseInputState& state, std::string& error) override {
+        if (!active_) { error = "virtual DualSense is not open"; return false; }
+        return active_->updateInput(state, error);
+    }
+    [[nodiscard]] bool connected() const noexcept override {
+        return active_ && active_->connected();
+    }
+    VirtualDualSenseStats stats() const override {
+        return active_ ? active_->stats() : VirtualDualSenseStats{};
+    }
+
+private:
+    VirtualDualSenseOptions options_;
+    std::unique_ptr<VirtualDualSense> active_;
+};
+
 } // namespace
 
 std::unique_ptr<VirtualDualSense> createVirtualDualSense(VirtualDualSenseOptions options) {
@@ -83,7 +133,7 @@ std::unique_ptr<VirtualDualSense> createVirtualDualSense(VirtualDualSenseOptions
     case VirtualDualSenseBackend::Auto:
     default:
         if (libViiperPrerequisitesPresent(options)) {
-            return createLibViiperVirtualDualSense(std::move(options));
+            return std::make_unique<FallbackVirtualDualSense>(std::move(options));
         }
         return createUhidVirtualDualSense(std::move(options));
     }

@@ -652,14 +652,35 @@ bool Apex5Device::takeAsyncWriteError(std::string& error) {
 
 void Apex5Device::writerLoop() {
     for (;;) {
-        std::optional<ForceTriggerCommand> trigger;
-        std::optional<std::pair<std::uint8_t, std::uint8_t>> rumble;
+        // Wait for something to send, then spend the pad's spacing *before*
+        // choosing what to send. Choosing first and sleeping afterwards meant a
+        // command could be superseded while it waited and still go out: the
+        // slot held one value at most, but that one value was already committed
+        // and burnt the next transmission window on a state the game had
+        // abandoned. Sleeping first lets every update during the wait land in
+        // the slot, and the newest one is what leaves.
         {
             std::unique_lock lock(queueMutex_);
             queueSignal_.wait(lock, [this] {
                 return writerStopping_ || pendingLeftTrigger_ || pendingRightTrigger_ ||
                        pendingRumble_;
             });
+            if (writerStopping_) {
+                return;
+            }
+        }
+
+        if (lastVendorWriteAt_.time_since_epoch().count() != 0) {
+            const auto since = std::chrono::steady_clock::now() - lastVendorWriteAt_;
+            if (since < kVendorWriteSpacing) {
+                std::this_thread::sleep_for(kVendorWriteSpacing - since);
+            }
+        }
+
+        std::optional<ForceTriggerCommand> trigger;
+        std::optional<std::pair<std::uint8_t, std::uint8_t>> rumble;
+        {
+            std::unique_lock lock(queueMutex_);
             if (writerStopping_) {
                 return;
             }
@@ -682,13 +703,14 @@ void Apex5Device::writerLoop() {
                 break;
             }
         }
+        if (!trigger && !rumble) {
+            continue;   // woken with nothing left to send
+        }
 
-        // Outside the lock: this is where the 25 ms is spent, and holding the
-        // queue through it would stall the very callers this exists to release.
+        // The spacing is already satisfied, so these do not wait again.
         std::string error;
         const bool ok = trigger ? setTriggerRaw(*trigger, error)
-                      : rumble  ? setRumble(rumble->first, rumble->second, error)
-                                : true;
+                                : setRumble(rumble->first, rumble->second, error);
         if (!ok) {
             {
                 std::lock_guard lock(asyncErrorMutex_);

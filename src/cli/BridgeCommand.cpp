@@ -520,6 +520,18 @@ int commandBridgeTriggers(int argc, char** argv) {
         rumbleResetOnExit = std::make_unique<asb::RumbleResetGuard>(*device);
     }
 
+    // Declared after both reset guards on purpose: destruction runs in reverse,
+    // so this joins the writer before either guard sends its reset. Without it,
+    // every early return below unwound with the writer still running and a
+    // reset could overtake an effect write already in flight, leaving the pad
+    // holding resistance the session believed it had cleared. Harmless while no
+    // writer is running, which is the case on every path that fails before it
+    // starts.
+    struct AsyncWriteStop {
+        asb::flydigi::Apex5Device* device;
+        ~AsyncWriteStop() { if (device) device->stopAsyncWrites(); }
+    } asyncWriteStop{&*device};
+
     auto inputSource = asb::platform::openPhysicalInputSource(
         device->info(), options.xinputIndex, error);
     if (!inputSource) {
@@ -595,13 +607,6 @@ int commandBridgeTriggers(int argc, char** argv) {
         return waitForNewVirtualDualSenseRemoval(
             preexistingDualSensePaths, std::chrono::milliseconds(2000), removalError);
     };
-
-    // Before anything can deliver feedback. From here the bridges hand their
-    // writes to this thread instead of sleeping out the pad's 25 ms inside the
-    // virtual device's output callback.
-    if (!device->startAsyncWrites(error)) {
-        return failSession(11, error);
-    }
 
     asb::dualsense::VirtualDualSenseStartupResult startupResult{};
     if (!asb::dualsense::startVerifiedVirtualDualSense(
@@ -755,6 +760,17 @@ int commandBridgeTriggers(int argc, char** argv) {
         }
     }
 
+    // Only now, with every synchronous write behind us. Startup does its own
+    // ordered writes - the baseline, an optional profile switch, and the
+    // baseline again after it - and those ran alongside a live writer before,
+    // sharing a transport and a spacing timestamp with no serialisation between
+    // them. Until this point the queue methods write straight through, which
+    // costs a callback the pad's 25 ms during startup and is the safer trade.
+    if (!device->startAsyncWrites(error)) {
+        virtualDualSense->close();
+        return failSession(11, error);
+    }
+
     if (sessionControl) {
         if (!sessionControl->publish(asb::platform::SessionPhase::Ready, 0,
                                      "Bridge ready; game launch may continue.", error) ||
@@ -878,6 +894,12 @@ int commandBridgeTriggers(int argc, char** argv) {
     std::uint64_t coalescedInputReports = 0;
     std::uint64_t keepaliveInputReports = 0;
     std::uint64_t forwardedPhysicalReports = 1;
+    // A write that failed on the writer thread. The bridges cannot report it:
+    // queueing succeeds, so they mark the effect as sent and their dedup cache
+    // suppresses the retry the game makes. Reading it here ends the session the
+    // way a synchronous write failure always did, rather than running on until
+    // exit believing the pad holds a state it never received.
+    std::string asyncWriteError;
     MicrosecondLatencyHistogram forwardingLatency;
     std::uint16_t virtualTouchMinimumX = 0xFFFF;
     std::uint16_t virtualTouchMaximumX = 0;
@@ -896,7 +918,8 @@ int commandBridgeTriggers(int argc, char** argv) {
     while (!g_stopRequested.load(std::memory_order_relaxed) &&
            !globalSessionStop->stopRequested() &&
            (!sessionControl || !sessionControl->stopRequested()) &&
-           !bridge.failed() && (!rumbleBridge || !rumbleBridge->failed())) {
+           !bridge.failed() && (!rumbleBridge || !rumbleBridge->failed()) &&
+           !device->takeAsyncWriteError(asyncWriteError)) {
         asb::dualsense::DualSenseInputState input{};
         const auto inputWait = inputSource->eventDriven()
             ? std::chrono::milliseconds(8)
@@ -1063,9 +1086,13 @@ int commandBridgeTriggers(int argc, char** argv) {
     // can be drained and joined too. The resets below then take the synchronous
     // path and report their own failures directly, as they always did.
     device->stopAsyncWrites();
+    // The loop takes it first and stops; anything here failed during shutdown.
     std::string queuedWriteError;
     if (device->takeAsyncWriteError(queuedWriteError)) {
-        std::cerr << "Warning: a queued APEX write failed: " << queuedWriteError << '\n';
+        asyncWriteError = queuedWriteError;
+    }
+    if (!asyncWriteError.empty()) {
+        std::cerr << "A queued APEX write failed: " << asyncWriteError << '\n';
     }
     const auto virtualStats = virtualDualSense->stats();
     const auto touchpadGestureStats = touchpadGestureMapper.stats();
