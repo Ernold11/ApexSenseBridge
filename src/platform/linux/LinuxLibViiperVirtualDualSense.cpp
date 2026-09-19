@@ -128,10 +128,7 @@ public:
                     std::chrono::steady_clock::now() - startedAt).count());
         };
 
-        auto libraryPath = options_.viiperLibrary;
-        if (libraryPath.empty()) {
-            libraryPath = executableDirectory() / "libVIIPER.so";
-        }
+        const auto libraryPath = resolveLibViiperLibraryPath(options_);
         std::error_code exists;
         if (!std::filesystem::is_regular_file(libraryPath, exists)) {
             error = "libVIIPER.so was not found at: " + libraryPath.string();
@@ -544,6 +541,14 @@ private:
 };
 
 } // namespace
+
+std::filesystem::path resolveLibViiperLibraryPath(
+    const VirtualDualSenseOptions& options) {
+    if (!options.viiperLibrary.empty()) {
+        return options.viiperLibrary;
+    }
+    return executableDirectory() / "libVIIPER.so";
+}
 
 std::unique_ptr<VirtualDualSense> createLibViiperVirtualDualSense(
     VirtualDualSenseOptions options) {

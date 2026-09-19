@@ -291,12 +291,12 @@ bool parseBridgeOptions(int argc, char** argv, BridgeCommandOptions& options,
             options.viiperExecutable = argv[i];
         } else if (value == "--virtual-backend") {
             if (++i >= argc) {
-                error = "--virtual-backend requires auto, integrated, or sidecar.";
+                error = "--virtual-backend requires auto, integrated, sidecar, or uhid (uhid is Linux only).";
                 return false;
             }
             const auto backend = parseVirtualDualSenseBackend(argv[i]);
             if (!backend) {
-                error = "--virtual-backend requires auto, integrated, or sidecar.";
+                error = "--virtual-backend requires auto, integrated, sidecar, or uhid (uhid is Linux only).";
                 return false;
             }
             options.virtualBackend = *backend;
@@ -409,7 +409,7 @@ int commandBridgeTriggers(int argc, char** argv) {
     BridgeCommandOptions options{};
     std::string error;
     if (!parseBridgeOptions(argc, argv, options, error)) {
-        std::cerr << error << "\nUsage: ApexSenseBridge bridge-triggers [index] [--seconds N] [--viiper PATH] [--virtual-backend auto|integrated|sidecar] [--telemetry-json PATH] [--proxy-xinput] [--xinput-index 0..3] [--rumble] [--haptic-threshold 0..95] [--verify-virtual-input] [--touchpad-profile NAME] [--view-hold-swipe-up] [--apex-profile 1..4] [--isolate-apex] [--session-token 32HEX]\n";
+        std::cerr << error << "\nUsage: ApexSenseBridge bridge-triggers [index] [--seconds N] [--viiper PATH] [--virtual-backend auto|integrated|sidecar|uhid] [--telemetry-json PATH] [--proxy-xinput] [--xinput-index 0..3] [--rumble] [--haptic-threshold 0..95] [--verify-virtual-input] [--touchpad-profile NAME] [--view-hold-swipe-up] [--apex-profile 1..4] [--isolate-apex] [--session-token 32HEX]\n";
         return 1;
     }
 

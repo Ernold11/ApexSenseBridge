@@ -75,6 +75,22 @@ sudo udevadm trigger --action=add \
     --subsystem-match=platform --attr-match=driver=vhci_hcd 2>/dev/null || true
 sudo udevadm settle --timeout=10 2>/dev/null || true
 
+# The kernel-side prerequisites above are what makes the automatic choice prefer
+# libVIIPER, but the library itself is not built or shipped by this script. Say
+# so plainly: a silent mismatch here used to end as a failed session rather than
+# a session without haptics.
+if [ -f "$PREFIX/bin/libVIIPER.so" ]; then
+    echo "libVIIPER.so found; DualSense audio haptics are available."
+else
+    echo
+    echo "No libVIIPER.so in $PREFIX/bin - the bridge will use the uhid backend."
+    echo "  Adaptive triggers, PlayStation prompts and rumble all work."
+    echo "  DualSense audio haptics do not: uhid creates no audio endpoint."
+    echo "  Build libVIIPER as a c-shared library and drop it beside the engine"
+    echo "  to enable them. Force the plain backend any time with:"
+    echo "      ApexSenseBridge bridge-triggers --virtual-backend uhid"
+fi
+
 if ! id -nG | tr ' ' '\n' | grep -qx input; then
     echo
     echo "WARNING: $(id -un) is not in the 'input' group, which /dev/uhid needs."

@@ -2,9 +2,16 @@
 
 #include "dualsense/VirtualDualSense.h"
 
+#include <filesystem>
 #include <memory>
 
 namespace asb::dualsense {
+
+// The path the libVIIPER backend will try to load. Exposed so the backend
+// chooser can ask the question ahead of time and get the same answer open()
+// will reach, instead of a second guess at the same rule.
+[[nodiscard]] std::filesystem::path resolveLibViiperLibraryPath(
+    const VirtualDualSenseOptions& options);
 
 // Publishes the controller through the kernel's uhid interface. Needs no
 // privileges and no kernel modules beyond uhid itself, but can only ever be a

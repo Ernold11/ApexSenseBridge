@@ -206,8 +206,11 @@ prompts flicker between PlayStation and Xbox on every press.
 | `uhid` (default) | nothing beyond the udev rules | triggers, prompts, rumble |
 | `libVIIPER` over USB/IP | `vhci-hcd`, installed by `install.sh` | the above plus audio haptics |
 
-`--virtual-backend auto` prefers libVIIPER when its prerequisites are present
-and falls back to uhid otherwise. Neither needs root at runtime.
+`--virtual-backend auto` prefers libVIIPER when all of its prerequisites are
+present - the kernel module, write access to its three paths, **and** the library
+itself - and falls back to uhid otherwise. `--virtual-backend uhid` forces the
+plain backend on a machine that would otherwise pick libVIIPER. Neither needs
+root at runtime.
 
 ### Manual checks
 
