@@ -66,7 +66,14 @@ if ! lsmod 2>/dev/null | grep -q '^vhci_hcd'; then
     sudo modprobe vhci-hcd || echo "  could not load vhci-hcd; the uhid backend still works"
 fi
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/apexsensebridge-vhci.conf 2>/dev/null || true
-sudo udevadm trigger --subsystem-match=platform --attr-match=driver=vhci_hcd 2>/dev/null || true
+# --action=add, not the default 'change': 72-apexsensebridge-vhci.rules matches
+# ACTION=="add", so on a machine where vhci_hcd was already loaded - which is
+# every machine after the first install - a 'change' event matches nothing and
+# the permissions are silently never granted. settle so this script does not
+# finish before the rule has actually run.
+sudo udevadm trigger --action=add \
+    --subsystem-match=platform --attr-match=driver=vhci_hcd 2>/dev/null || true
+sudo udevadm settle --timeout=10 2>/dev/null || true
 
 if ! id -nG | tr ' ' '\n' | grep -qx input; then
     echo
