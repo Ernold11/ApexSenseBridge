@@ -650,7 +650,15 @@ bool Apex5Device::takeAsyncWriteError(std::string& error) {
     return true;
 }
 
+std::uint64_t Apex5Device::asyncWriteRetries() const noexcept {
+    return asyncWriteRetries_.load(std::memory_order_relaxed);
+}
+
 void Apex5Device::writerLoop() {
+    // Consecutive, not total: an occasional dropped command is normal, a run of
+    // them is not.
+    constexpr unsigned kMaxConsecutiveWriteFailures = 10;
+    unsigned consecutiveFailures = 0;
     for (;;) {
         // Wait for something to send, then spend the pad's spacing *before*
         // choosing what to send. Choosing first and sleeping afterwards meant a
@@ -711,13 +719,41 @@ void Apex5Device::writerLoop() {
         std::string error;
         const bool ok = trigger ? setTriggerRaw(*trigger, error)
                                 : setRumble(rumble->first, rumble->second, error);
-        if (!ok) {
-            {
-                std::lock_guard lock(asyncErrorMutex_);
-                asyncError_ = std::move(error);
-            }
-            asyncWriteFailed_.store(true, std::memory_order_release);
+        if (ok) {
+            consecutiveFailures = 0;
+            continue;
         }
+
+        // Put it back and let the next cycle send it again. This pad drops a
+        // command now and then - that is the whole reason the spacing exists -
+        // and ending a session mid-game over one of them is a worse failure
+        // than the failure. A value the game has already superseded is not
+        // restored: the newer one is what should go.
+        {
+            std::lock_guard lock(queueMutex_);
+            if (trigger) {
+                auto& slot = trigger->side == TriggerSide::Left ? pendingLeftTrigger_
+                                                                : pendingRightTrigger_;
+                if (!slot) {
+                    slot = trigger;
+                }
+            } else if (!pendingRumble_) {
+                pendingRumble_ = rumble;
+            }
+        }
+        asyncWriteRetries_.fetch_add(1, std::memory_order_relaxed);
+
+        // Retries are spaced like any other write, so this is about a quarter
+        // of a second of an output path that will not take anything at all.
+        if (++consecutiveFailures < kMaxConsecutiveWriteFailures) {
+            continue;
+        }
+        {
+            std::lock_guard lock(asyncErrorMutex_);
+            asyncError_ = std::move(error);
+        }
+        asyncWriteFailed_.store(true, std::memory_order_release);
+        consecutiveFailures = 0;
     }
 }
 

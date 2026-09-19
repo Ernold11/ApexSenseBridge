@@ -95,8 +95,15 @@ public:
     bool queueRumble(std::uint8_t lowFrequencyMotor, std::uint8_t highFrequencyMotor,
                      std::string& error);
 
-    // A queued write that failed after its caller had gone. Latched, and
-    // cleared by reading, so a caller polling this cannot miss one.
+    // How many queued writes were retried. A handful over a session is the pad
+    // dropping the odd command, which it does; a climbing number means the
+    // output path is unwell even though the session survived.
+    [[nodiscard]] std::uint64_t asyncWriteRetries() const noexcept;
+
+    // A queued write that failed and kept failing. Latched, and cleared by
+    // reading, so a caller polling this cannot miss one. A single failure does
+    // not set it: the value goes back in its slot and the next cycle sends it
+    // again, because one dropped command is not worth ending a session over.
     bool takeAsyncWriteError(std::string& error);
 
 private:
@@ -134,6 +141,7 @@ private:
     bool writerStopping_ = false;
 
     std::atomic<bool> asyncWriteFailed_{false};
+    std::atomic<std::uint64_t> asyncWriteRetries_{0};
     std::mutex asyncErrorMutex_{};
     std::string asyncError_{};
 };

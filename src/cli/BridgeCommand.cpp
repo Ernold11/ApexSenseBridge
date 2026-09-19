@@ -1092,7 +1092,11 @@ int commandBridgeTriggers(int argc, char** argv) {
         asyncWriteError = queuedWriteError;
     }
     if (!asyncWriteError.empty()) {
-        std::cerr << "A queued APEX write failed: " << asyncWriteError << '\n';
+        std::cerr << "A queued APEX write kept failing: " << asyncWriteError << '\n';
+    }
+    if (const auto retries = device->asyncWriteRetries(); retries != 0) {
+        std::cerr << "Note: " << retries
+                  << " queued APEX write(s) were retried after a failure.\n";
     }
     const auto virtualStats = virtualDualSense->stats();
     const auto touchpadGestureStats = touchpadGestureMapper.stats();
